@@ -1,0 +1,23 @@
+[package]
+name = "dgpe"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["tsrl <tsrl@mit.edu>"]
+
+[dependencies]
+disjoint = "0.8.0"
+rand = "0.9"
+
+[dependencies.petgraph]
+version = "0.8.3"
+default-features = false
+features = ["std"]
+
+[dependencies.gf2-linalg]
+default-features = false
+git = "https://github.com/tlaakkonen/gf2-linalg"
+
+[dependencies.mwmatching]
+git = "https://github.com/ahenshaw/mwmatching"
+rev = "47dba28b30b710232d7b2efa43b5a61e9c634d42"
