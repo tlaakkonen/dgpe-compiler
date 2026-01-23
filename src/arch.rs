@@ -1,32 +1,40 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use petgraph::{graph::{IndexType, DiGraph, NodeIndex, UnGraph, WalkNeighbors}, visit::{EdgeRef, IntoEdgeReferences, NodeFiltered}};
+use petgraph::{stable_graph::{IndexType, NodeIndex, StableDiGraph, StableUnGraph, WalkNeighbors}, visit::{EdgeRef, IntoEdgeReferences, NodeFiltered}};
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+use crate::{Circuit, Gate};
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LocalQubit {
     pub idx: usize,
     pub offset: usize,
     pub global: usize
 }
 
+impl std::fmt::Debug for LocalQubit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}/{}", self.idx, self.offset, self.global)
+    }
+}
+
 pub type QubitIndex = NodeIndex;
 pub type PartIndex = NodeIndex;
 
 #[derive(Debug, Clone)]
-pub struct Part {
+pub struct LocalArch {
     pub idx: PartIndex, 
     pub qubits: Vec<QubitIndex>, 
     pub topo: APSP<LocalQubit, ()>
 }
 
 #[derive(Debug, Clone)]
-pub struct Architecture {
+pub struct GlobalArch {
     pub local: Vec<LocalQubit>,
-    pub parts: Vec<Part>,
-    pub nonlocal: APSP<usize, (usize, usize)>,
+    pub parts: Vec<LocalArch>,
+    pub topo: APSP<usize, (LocalQubit, LocalQubit)>,
 }
 
-impl Architecture {
+impl GlobalArch {
     pub fn to_local(&self, q: usize) -> LocalQubit {
         self.local[q]
     }
@@ -45,18 +53,40 @@ impl Architecture {
 
     pub fn range(&self, idx: usize) -> impl Iterator<Item=usize> {
         let part = &self.parts[idx];
-        part.qubits.iter().map(|&i| part.topo.graph[i].global)
+        part.qubits.iter().map(|&i| part.topo[i].global)
     }
-}
 
-impl Architecture {
-    pub fn all_to_all(k: usize, q: usize) -> Architecture {
+    pub fn is_circuit_valid(&self, circuit: &Circuit) -> bool {
+        if circuit.qubits != self.qubits() { return false }
+        
+        for &gate in &circuit.gates {
+            if let Gate::CX(i, j) = gate {
+                let i = self.local[i];
+                let j = self.local[j];
+                if i.idx == j.idx {
+                    let local = &self.parts[i.idx];
+                    if !local.topo.graph.contains_edge(local.qubits[i.offset], local.qubits[j.offset]) {
+                        return false
+                    }
+                } else {
+                    if !self.topo.graph.edges_connecting(self.parts[i.idx].idx, self.parts[j.idx].idx)
+                        .any(|e| *e.weight() == (i, j) || *e.weight() == (j, i)) {
+                        return false
+                    }
+                }
+            }
+        }
+
+        true
+    }
+
+    pub fn all_to_all(k: usize, q: usize) -> GlobalArch {
         let mut local = Vec::new();
         let mut parts = Vec::new();
-        let mut nonlocal = UnGraph::new_undirected();
+        let mut nonlocal = StableUnGraph::default();
         for p in 0..k {
             let idx = nonlocal.add_node(p);
-            let mut topo = UnGraph::new_undirected();
+            let mut topo = StableUnGraph::default();
             let mut qubits = Vec::new();
             for i in 0..q {
                 let lq = LocalQubit { idx: p, offset: i, global: local.len() };
@@ -64,39 +94,79 @@ impl Architecture {
                 local.push(lq);
             }
 
-            for a in topo.node_indices() {
-                for b in topo.node_indices() {
+            for a in 0..q {
+                for b in 0..q{
                     if a >= b { continue }
-                    topo.add_edge(a, b, ());
+                    topo.add_edge(qubits[a], qubits[b], ());
                 }
             }
 
-            parts.push(Part { idx, qubits, topo: APSP::build(topo) });
+            parts.push(LocalArch { idx, qubits, topo: APSP::build(topo) });
         }
 
-        for a in nonlocal.node_indices() {
-            for b in nonlocal.node_indices() {
-                if a >= b { continue }
+        for ia in 0..k {
+            for ib in 0..k {
+                if ia >= ib { continue }
                 for i in 0..q {
                     for j in 0..q {
-                        nonlocal.add_edge(a, b, (i, j));
+                        nonlocal.add_edge(parts[ia].idx, parts[ib].idx, (parts[ia].topo[parts[ia].qubits[i]], parts[ib].topo[parts[ib].qubits[j]]));
                     }
                 }
             }
         }
 
-        Architecture { local, parts, nonlocal: APSP::build(nonlocal) }
+        GlobalArch { local, parts, topo: APSP::build(nonlocal) }
+    }
+
+    pub fn linear_nearest_neighbor(k: usize, q: usize) -> GlobalArch {
+        let mut local = Vec::new();
+        let mut parts = Vec::new();
+        let mut nonlocal = StableUnGraph::default();
+        for p in 0..k {
+            let idx = nonlocal.add_node(p);
+            let mut topo = StableUnGraph::default();
+            let mut qubits = Vec::new();
+            for i in 0..q {
+                let lq = LocalQubit { idx: p, offset: i, global: local.len() };
+                qubits.push(topo.add_node(lq));
+                local.push(lq);
+            }
+
+            for i in 0..q-1 {
+                topo.add_edge(qubits[i], qubits[i + 1], ());
+            }
+
+            parts.push(LocalArch { idx, qubits, topo: APSP::build(topo) });
+        }
+
+        for i in 0..k-1 {
+            nonlocal.add_edge(parts[i].idx, parts[i+1].idx, (
+                parts[i].topo[parts[i].qubits[q - 1]],
+                parts[i+1].topo[parts[i+1].qubits[0]]
+            ));
+        }
+
+        GlobalArch { local, parts, topo: APSP::build(nonlocal) }
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct APSP<N, E> {
-    pub graph: UnGraph<N, E>,
-    pub dist: DiGraph<(), (usize, NodeIndex)>
+    pub graph: StableUnGraph<N, E>,
+    pub dist: StableDiGraph<(), (usize, NodeIndex)>,
+    pub cutpoints: HashSet<NodeIndex>
+}
+
+impl<N, E> std::ops::Index<NodeIndex> for APSP<N, E> {
+    type Output = N;
+
+    fn index(&self, index: NodeIndex) -> &Self::Output {
+        &self.graph[index]
+    }
 }
 
 impl<N, E> APSP<N, E> {
-    pub fn build(graph: UnGraph<N, E>) -> APSP<N, E> {
+    pub fn build(graph: StableUnGraph<N, E>) -> APSP<N, E> {
         let mut dist = graph
             .filter_map(|_, _| Some(()), |_, _| None)
             .into_edge_type();
@@ -107,9 +177,7 @@ impl<N, E> APSP<N, E> {
 
         for e in graph.edge_references() {
             dist.update_edge(e.source(), e.target(), (1, e.target()));
-            if !graph.is_directed() {
-                dist.update_edge(e.target(), e.source(), (1, e.source()));
-            }
+            dist.update_edge(e.target(), e.source(), (1, e.source()));
         }
 
         for k in graph.node_indices() {
@@ -129,12 +197,23 @@ impl<N, E> APSP<N, E> {
             }
         }
 
+        let cutpoints = find_cut_vertices(&graph);
+
         let mut edges = dist.edge_references().map(|e| (e.source(), e.target(), *e.weight())).collect::<Vec<_>>();
         edges.sort_by_key(|&(_, _, (d, _))| d);
         dist.clear_edges();
         edges.into_iter().for_each(|(a, b, w)| { dist.add_edge(a, b, w); });
+        APSP { graph, dist, cutpoints }
+    }
 
-        APSP { graph, dist }
+    pub fn delete_vertex(&mut self, v: NodeIndex) {
+        let mut graph = std::mem::take(&mut self.graph);
+        graph.remove_node(v);
+        *self = APSP::build(graph);
+    }
+
+    pub fn is_cutting(&self, v: NodeIndex) -> bool {
+        self.cutpoints.contains(&v)
     }
 
     pub fn shortest_path(&self, source: NodeIndex, target: NodeIndex) -> Option<impl Iterator<Item=NodeIndex>> {
@@ -152,6 +231,7 @@ impl<N, E> APSP<N, E> {
     }
 
     pub fn steiner_tree(&self, terms: impl IntoIterator<Item=NodeIndex>) -> SteinerTree {
+        let terms = terms.into_iter().collect::<HashSet<_>>();
         let terms = terms.into_iter().enumerate().map(|(i, n)| (n, i)).collect::<HashMap<_, _>>();
 
         let mut nodes = HashMap::new();
@@ -185,14 +265,14 @@ impl<N, E> APSP<N, E> {
 
         loop {
             let mut found = false;
-            for idx in tree.node_indices().rev() {
-                if terms.contains_key(&tree[idx]) { continue }
-                let mut neighs = tree.neighbors(idx);
+            tree.retain_nodes(|g, idx| {
+                if terms.contains_key(&g[idx]) { return true }
+                let mut neighs = g.neighbors_undirected(idx);
                 if neighs.next().is_none() || neighs.next().is_none() {
                     found = true;
-                    tree.remove_node(idx);
-                }
-            }
+                    false
+                } else { true }
+            });
             if !found { break }
         }
 
@@ -200,8 +280,54 @@ impl<N, E> APSP<N, E> {
     }
 }
 
+// Tarjan's algorithm for finding articulation points. 
+// This is necessary because petgraph::algo::articulation_points does not support StableGraph.
+fn find_cut_vertices<N, E>(graph: &StableUnGraph<N, E>) -> HashSet<NodeIndex> {
+    #[derive(Default)]
+    struct CutNodeData {
+        visited: bool,
+        low: usize, 
+        depth: usize, 
+        parent: Option<NodeIndex>, 
+        cut: bool
+    }
+
+    fn find_cut_vertices_helper(graph: &mut StableUnGraph<CutNodeData, ()>, i: NodeIndex, d: usize) {
+        graph[i].visited = true;
+        graph[i].depth = d;
+        graph[i].low = d;
+        let mut child_count = 0;
+        let mut is_articulation = false;
+
+        let mut neighs = graph.neighbors_undirected(i).detach();
+        while let Some(ni) = neighs.next_node(graph) {
+            if !graph[ni].visited {
+                graph[ni].parent = Some(i);
+                find_cut_vertices_helper(graph, ni, d + 1);
+                child_count += 1;
+                if graph[ni].low >= graph[i].depth {
+                    is_articulation = true;
+                }
+                graph[i].low = graph[i].low.min(graph[ni].low);
+            } else if  Some(ni) != graph[i].parent {
+                graph[i].low = graph[i].low.min(graph[ni].depth)
+            }
+        }
+        
+        if (graph[i].parent.is_some() && is_articulation) || (graph[i].parent.is_none() && child_count > 1) {
+            graph[i].cut = true;
+        }
+    }
+
+    let mut mapped = graph.map(|_, _| CutNodeData::default(), |_, _| ());
+    while let Some(root) = mapped.node_indices().find(|&n| !mapped[n].visited) {
+        find_cut_vertices_helper(&mut mapped, root, 0);
+    }
+    mapped.node_indices().filter(|&n| mapped[n].cut).collect()
+}
+
 pub struct SteinerTree {
-    pub tree: UnGraph<NodeIndex, ()>
+    pub tree: StableUnGraph<NodeIndex, ()>
 }
 
 impl SteinerTree {
@@ -218,12 +344,12 @@ struct TreeEdgesPostorder<'a, N, E, Ix> {
     stack: Vec<(NodeIndex<Ix>, WalkNeighbors<Ix>)>,
     node: NodeIndex<Ix>,
     walker: WalkNeighbors<Ix>,
-    tree: &'a UnGraph<N, E, Ix>
+    tree: &'a StableUnGraph<N, E, Ix>
 }
 
 impl<'a, N, E, Ix: IndexType> TreeEdgesPostorder<'a, N, E, Ix> {
-    fn new(tree: &'a UnGraph<N, E, Ix>, root: NodeIndex<Ix>) -> Self {
-        TreeEdgesPostorder { stack: Vec::new(), node: root, walker: tree.neighbors(root).detach(), tree }
+    fn new(tree: &'a StableUnGraph<N, E, Ix>, root: NodeIndex<Ix>) -> Self {
+        TreeEdgesPostorder { stack: Vec::new(), node: root, walker: tree.neighbors_undirected(root).detach(), tree }
     }
 
     fn next_child(&mut self) -> Option<NodeIndex<Ix>> {
@@ -245,7 +371,7 @@ impl<'a, N: Clone, E, Ix: IndexType> Iterator for TreeEdgesPostorder<'a, N, E, I
         while let Some(child) = self.next_child() {
             self.stack.push((
                 std::mem::replace(&mut self.node, child), 
-                std::mem::replace(&mut self.walker, self.tree.neighbors(child).detach())
+                std::mem::replace(&mut self.walker, self.tree.neighbors_undirected(child).detach())
             ));
 
             depth += 1;

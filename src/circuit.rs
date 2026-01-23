@@ -1,6 +1,6 @@
 use std::{collections::HashSet, fmt::Debug};
 use petgraph::graph::{DiGraph, NodeIndex};
-use crate::{Architecture, LocalQubit, PauliString};
+use crate::{GlobalArch, LocalQubit, PauliString};
 
 #[derive(Clone, Copy, Debug)]
 pub enum Gate {
@@ -273,7 +273,7 @@ impl Circuit {
         buffer
     }
 
-    pub fn partition(&self, arch: &Architecture) -> PartitionedCircuit {
+    pub fn partition(&self, arch: &GlobalArch) -> PartitionedCircuit {
         let mut exps = Vec::new();
         let mut gates = Vec::new();
         for &gate in self.gates.iter().rev() {
@@ -346,14 +346,14 @@ pub struct Bin<S> {
 
 #[derive(Debug, Clone)]
 pub struct PartitionedCircuit<S=()> {
-    pub arch: Architecture,
+    pub arch: GlobalArch,
     pub dag: DiGraph<PauliExp, ()>,
     pub bins: Vec<Bin<S>>,
     pub tail: Circuit
 }
 
 impl PartitionedCircuit {
-    pub fn new(arch: Architecture, exps: Vec<PauliExp>, tail: Circuit) -> PartitionedCircuit {
+    pub fn new(arch: GlobalArch, exps: Vec<PauliExp>, tail: Circuit) -> PartitionedCircuit {
         let mut sets = Vec::new();
         let mut nodes = Vec::new();
         let mut dag = DiGraph::new();

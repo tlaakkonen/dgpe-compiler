@@ -10,9 +10,10 @@ disjoint = "0.8.0"
 rand = "0.9"
 
 [dependencies.petgraph]
-version = "0.8.3"
+git = "https://github.com/tlaakkonen/petgraph"
+branch = "fixes"
 default-features = false
-features = ["std"]
+features = ["std", "stable_graph"]
 
 [dependencies.gf2-linalg]
 default-features = false

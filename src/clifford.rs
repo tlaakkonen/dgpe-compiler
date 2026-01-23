@@ -1,5 +1,5 @@
 use std::{collections::HashSet, fmt::Debug};
-use crate::{Circuit, Gate};
+use crate::{Circuit, Gate, LocalArch};
 use gf2_linalg::{LinearSpace, Matrix, ToGF2};
 use petgraph::graph::UnGraph;
 
@@ -477,7 +477,7 @@ impl CliffordBasis {
     }
 
     // This is the procedure from 2309.08972
-    pub fn reduce_pair_simplified(&mut self, row: usize, col: usize, rec: &mut (impl CliffordRecorder + ?Sized)) {
+    pub fn reduce_pair_sweep(&mut self, arch: Option<&LocalArch>, row: usize, col: usize, rec: &mut (impl CliffordRecorder + ?Sized)) {
         use Pauli::{I, X, Y, Z};
 
         // Make all the stabilizer Paulis Zs
@@ -489,16 +489,43 @@ impl CliffordBasis {
             }
         }
 
-        // If the target is not a Z, then make it one
-        if self.stabs[col].get(row) == I {
-            let pivot = self.stabs[col].zs.iter().position(|&z| z == true).unwrap();
-            self.cx(row, pivot); rec.cx(row, pivot);
-        }
+        if let Some(arch) = arch {
+            // Constrained case
+            // Find a Steiner tree connecting the target and the non-identity qubits in the stabilizer
+            let terms = (0..self.qubits)
+                .filter(|&i| self.stabs[col].zs[i])
+                .map(|i| arch.qubits[i])
+                .chain([arch.qubits[row]]);
+            let tree = arch.topo.steiner_tree(terms);
 
-        // Eliminate all non-target qubits in the stabilizer
-        for i in 0..self.qubits {
-            if i == row { continue }
-            if self.stabs[col].get(i) == Z { self.cx(i, row); rec.cx(i, row); }
+            // Fill the Steiner points and target
+            for (parent, child) in tree.edges_postorder(arch.qubits[row]) {
+                let parent = arch.topo[parent].offset;
+                let child = arch.topo[child].offset;
+                if !self.stabs[col].zs[parent] {
+                    self.cx(parent, child); rec.cx(parent, child);
+                }
+            }
+
+            // Clear the non-target qubits
+            for (parent, child) in tree.edges_postorder(arch.qubits[row]) {
+                let parent = arch.topo[parent].offset;
+                let child = arch.topo[child].offset;
+                self.cx(child, parent); rec.cx(child, parent);
+            }
+        } else {
+            // All-to-all case
+            // If the target is not a Z, then make it one
+            if self.stabs[col].get(row) == I {
+                let pivot = self.stabs[col].zs.iter().position(|&z| z == true).unwrap();
+                self.cx(row, pivot); rec.cx(row, pivot);
+            }
+
+            // Eliminate all non-target qubits in the stabilizer
+            for i in 0..self.qubits {
+                if i == row { continue }
+                if self.stabs[col].get(i) == Z { self.cx(i, row); rec.cx(i, row); }
+            }
         }
 
         // Make all the destabilizer Paulis Xs 
@@ -512,10 +539,37 @@ impl CliffordBasis {
             }
         }
 
-        // Eliminate all non-target qubits in the destabilizer
-        for i in 0..self.qubits {
-            if i == row { continue }
-            if self.destabs[col].get(i) == X { self.cx(row, i); rec.cx(row, i); }
+        if let Some(arch) = arch {
+            // Constrained case
+            // Find a Steiner tree connecting the target and the non-identity qubits in the destabilizer
+            let terms = (0..self.qubits)
+                .filter(|&i| self.destabs[col].xs[i])
+                .map(|i| arch.qubits[i])
+                .chain([arch.qubits[row]]);
+            let tree = arch.topo.steiner_tree(terms);
+
+            // Fill the Steiner points and target
+            for (parent, child) in tree.edges_postorder(arch.qubits[row]) {
+                let parent = arch.topo[parent].offset;
+                let child = arch.topo[child].offset;
+                if !self.destabs[col].xs[parent] {
+                    self.cx(child, parent); rec.cx(child, parent);
+                }
+            }
+
+            // Clear the non-target qubits
+            for (parent, child) in tree.edges_postorder(arch.qubits[row]) {
+                let parent = arch.topo[parent].offset;
+                let child = arch.topo[child].offset;
+                self.cx(parent, child); rec.cx(parent, child);
+            }
+        } else {
+            // All-to-all case
+            // Eliminate all non-target qubits in the destabilizer
+            for i in 0..self.qubits {
+                if i == row { continue }
+                if self.destabs[col].get(i) == X { self.cx(row, i); rec.cx(row, i); }
+            }
         }
 
         // Fix signs
@@ -523,8 +577,12 @@ impl CliffordBasis {
         if self.destabs[col].sign { self.z(row); rec.z(row); }
     }
 
-    pub fn reduce_pair(&mut self, row: usize, col: usize, rec: &mut (impl CliffordRecorder + ?Sized)) {
+    // This is (a version of) the procedure from 2105.02291
+    pub fn reduce_pair_match(&mut self, arch: Option<&LocalArch>, row: usize, col: usize, rec: &mut (impl CliffordRecorder + ?Sized)) {
         use Pauli::{I, X, Y, Z};
+
+        // Constrained architecture is TODO
+        assert!(arch.is_none());
 
         // Make only one qubit anticommute, try to make it the target
         let mut idx = 0;
@@ -602,24 +660,34 @@ impl CliffordBasis {
         if self.destabs[col].sign { self.z(row); rec.z(row); }
     }
 
-    pub fn synthesize(&mut self, rec: &mut (impl CliffordRecorder + ?Sized)) {
+    pub fn synthesize(&mut self, arch: Option<&LocalArch>, method: SynthesisMethod, rec: &mut (impl CliffordRecorder + ?Sized)) {
         assert!(self.is_symplectic());
 
         let mut visited = HashSet::new();
+        let mut arch = arch.cloned();
         for _ in 0..self.qubits {
             let pivot = (0..self.qubits)
                 .filter(|i| !visited.contains(i))
+                .filter(|&i| arch.as_ref().map(|arch| !arch.topo.is_cutting(arch.qubits[i])).unwrap_or(true))
                 .min_by_key(|&i| self.stabs[i].weight() + self.destabs[i].weight())
                 .unwrap();
-            self.reduce_pair(pivot, pivot, rec);
+
+            match method {
+                SynthesisMethod::Match => self.reduce_pair_match(arch.as_ref(), pivot, pivot, rec),
+                SynthesisMethod::Sweep => self.reduce_pair_sweep(arch.as_ref(), pivot, pivot, rec)
+            }
+
             visited.insert(pivot);
+            if let Some(arch) = &mut arch {
+                arch.topo.delete_vertex(arch.qubits[pivot]);
+            }
         }
     }
 
     pub fn inverse(&self) -> CliffordBasis {
         assert!(self.is_symplectic());
         let mut inv = CliffordBasis::identity(self.qubits);
-        self.clone().synthesize(&mut inv);
+        self.clone().synthesize(None, SynthesisMethod::Match, &mut inv);
         inv
     }
 
@@ -644,6 +712,12 @@ impl CliffordBasis {
         basis.apply_gates(circ.gates.iter().copied())?;
         Some(basis)
     }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum SynthesisMethod {
+    Sweep,
+    Match
 }
 
 pub trait CNOTRecorder {
