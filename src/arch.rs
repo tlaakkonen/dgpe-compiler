@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use petgraph::{stable_graph::{IndexType, NodeIndex, StableDiGraph, StableUnGraph, WalkNeighbors}, visit::{EdgeRef, IntoEdgeReferences, NodeFiltered}};
+use petgraph::{graph::UnGraph, stable_graph::{IndexType, NodeIndex, StableDiGraph, StableUnGraph, WalkNeighbors}, visit::{EdgeRef, IntoEdgeReferences, NodeFiltered}};
 
 use crate::{Circuit, Gate};
 
@@ -58,7 +58,7 @@ impl GlobalArch {
 
     pub fn is_circuit_valid(&self, circuit: &Circuit) -> bool {
         if circuit.qubits != self.qubits() { return false }
-        
+
         for &gate in &circuit.gates {
             if let Gate::CX(i, j) = gate {
                 let i = self.local[i];
@@ -207,6 +207,7 @@ impl<N, E> APSP<N, E> {
     }
 
     pub fn delete_vertex(&mut self, v: NodeIndex) {
+        // TODO: improve this with some incremental computation
         let mut graph = std::mem::take(&mut self.graph);
         graph.remove_node(v);
         *self = APSP::build(graph);
@@ -214,6 +215,10 @@ impl<N, E> APSP<N, E> {
 
     pub fn is_cutting(&self, v: NodeIndex) -> bool {
         self.cutpoints.contains(&v)
+    }
+
+    pub fn distance_between(&self, source: NodeIndex, target: NodeIndex) -> Option<usize> {
+        Some(self.dist[self.dist.find_edge(source, target)?].0)
     }
 
     pub fn shortest_path(&self, source: NodeIndex, target: NodeIndex) -> Option<impl Iterator<Item=NodeIndex>> {
@@ -230,18 +235,63 @@ impl<N, E> APSP<N, E> {
         }))
     }
 
-    pub fn steiner_tree(&self, terms: impl IntoIterator<Item=NodeIndex>) -> SteinerTree {
+    pub fn matching(&self, terms: impl IntoIterator<Item=NodeIndex>) -> Vec<Vec<NodeIndex>> {
         let terms = terms.into_iter().collect::<HashSet<_>>();
+        let mut subgraph = UnGraph::new_undirected();
+        let terms = terms.into_iter().map(|n| (n, subgraph.add_node(n))).collect::<HashMap<_, _>>();
+        for (&i, &ci) in &terms {
+            for (&j, &cj) in &terms {
+                if i == j { continue }
+                let Some(dist) = self.distance_between(i, j) else { continue };
+                subgraph.update_edge(ci, cj, -(dist as i32));
+            }
+        }
+        let edges = subgraph.edge_references()
+            .map(|e| (e.source().index(), e.target().index(), *e.weight()))
+            .collect::<Vec<_>>();
+
+        let mut matching = mwmatching::Matching::new(edges);
+        matching.max_cardinality();
+        let mates = matching.solve();
+
+        let mut result = Vec::new();
+        for i in 0..mates.len() {
+            if mates[i] == usize::MAX || i >= mates[i] { continue }
+            let j = subgraph[NodeIndex::new(mates[i])];
+            let i = subgraph[NodeIndex::new(i)];
+            let mut path = vec![i];
+            path.extend(self.shortest_path(i, j).unwrap());
+            result.push(path)
+        }
+
+        result
+    }
+
+    /// Construct an approximate Steiner forest which covers all the leaves and the roots,
+    /// such that each connected component contains exactly one of the roots.
+    pub fn steiner_forest(&self, leaves: impl IntoIterator<Item=NodeIndex>, roots: impl IntoIterator<Item=NodeIndex>) -> SteinerForest {
+        let roots = roots.into_iter().collect::<HashSet<_>>();
+        let terms = leaves.into_iter().chain(roots.iter().copied()).collect::<HashSet<_>>();
         let terms = terms.into_iter().enumerate().map(|(i, n)| (n, i)).collect::<HashMap<_, _>>();
 
-        let mut nodes = HashMap::new();
+        let mut nodes = terms.clone();
         let mut ds = disjoint::DisjointSet::with_len(terms.len());
         let filtered = NodeFiltered::from_fn(&self.dist, |n| terms.contains_key(&n));
         let mut count = 0;
+        let mut marked = roots.iter().map(|r| ds.root_of(terms[r])).collect::<HashSet<_>>();
         for edge in filtered.edge_references() {
             if count == terms.len() - 1 { break }
-            if ds.join(terms[&edge.source()], terms[&edge.target()]) {
+            
+            let root_s = ds.root_of(terms[&edge.source()]);
+            let root_t = ds.root_of(terms[&edge.target()]);
+            let marked_s = marked.contains(&root_s);
+            let marked_t = marked.contains(&root_t);
+            if (!marked_s || !marked_t) && root_s != root_t {
+                ds.join(terms[&edge.source()], terms[&edge.target()]);
+                let root = ds.root_of(terms[&edge.source()]);
+                if marked_s || marked_t { marked.insert(root);}
                 count += 1;
+
                 let idx = nodes.len();
                 nodes.entry(edge.source()).or_insert(idx);
                 for node in self.shortest_path(edge.source(), edge.target()).unwrap() {
@@ -256,9 +306,16 @@ impl<N, E> APSP<N, E> {
             .into_edge_type();
         let mut ds = disjoint::DisjointSet::with_len(nodes.len());
         let filtered = NodeFiltered::from_fn(&self.graph, |n| nodes.contains_key(&n));
+        let mut marked = roots.iter().map(|r| ds.root_of(nodes[r])).collect::<HashSet<_>>();
         for edge in filtered.edge_references() {
-            if tree.edge_count() == nodes.len() - 1 { break }
-            if ds.join(nodes[&edge.source()], nodes[&edge.target()]) {
+            let root_s = ds.root_of(nodes[&edge.source()]);
+            let root_t = ds.root_of(nodes[&edge.target()]);
+            let marked_s = marked.contains(&root_s);
+            let marked_t = marked.contains(&root_t);
+            if (!marked_s || !marked_t) && root_s != root_t {
+                ds.join(nodes[&edge.source()], nodes[&edge.target()]);
+                let root = ds.root_of(nodes[&edge.source()]);
+                if marked_s || marked_t { marked.insert(root);}
                 tree.add_edge(edge.source(), edge.target(), ());
             }
         }
@@ -276,7 +333,7 @@ impl<N, E> APSP<N, E> {
             if !found { break }
         }
 
-        SteinerTree { tree }
+        SteinerForest { forest: tree }
     }
 }
 
@@ -326,14 +383,14 @@ fn find_cut_vertices<N, E>(graph: &StableUnGraph<N, E>) -> HashSet<NodeIndex> {
     mapped.node_indices().filter(|&n| mapped[n].cut).collect()
 }
 
-pub struct SteinerTree {
-    pub tree: StableUnGraph<NodeIndex, ()>
+pub struct SteinerForest {
+    pub forest: StableUnGraph<NodeIndex, ()>
 }
 
-impl SteinerTree {
-    pub fn edges_postorder(&self, root: NodeIndex) -> impl Iterator<Item=(NodeIndex, NodeIndex)> {
-        let root = self.tree.node_indices().find(|&r| self.tree[r] == root).unwrap();
-        TreeEdgesPostorder::new(&self.tree, root)
+impl SteinerForest {
+    pub fn edges_postorder(&self, root: NodeIndex, twice: bool) -> impl Iterator<Item=(Option<NodeIndex>, NodeIndex, NodeIndex)> {
+        let root = self.forest.node_indices().find(|&r| self.forest[r] == root).unwrap();
+        TreeEdgesPostorder::new(&self.forest, root, twice)
     }
 }
 
@@ -344,12 +401,14 @@ struct TreeEdgesPostorder<'a, N, E, Ix> {
     stack: Vec<(NodeIndex<Ix>, WalkNeighbors<Ix>)>,
     node: NodeIndex<Ix>,
     walker: WalkNeighbors<Ix>,
-    tree: &'a StableUnGraph<N, E, Ix>
+    tree: &'a StableUnGraph<N, E, Ix>,
+    flag: bool,
+    twice: bool
 }
 
 impl<'a, N, E, Ix: IndexType> TreeEdgesPostorder<'a, N, E, Ix> {
-    fn new(tree: &'a StableUnGraph<N, E, Ix>, root: NodeIndex<Ix>) -> Self {
-        TreeEdgesPostorder { stack: Vec::new(), node: root, walker: tree.neighbors_undirected(root).detach(), tree }
+    fn new(tree: &'a StableUnGraph<N, E, Ix>, root: NodeIndex<Ix>, twice: bool) -> Self {
+        TreeEdgesPostorder { stack: Vec::new(), node: root, walker: tree.neighbors_undirected(root).detach(), tree, twice, flag: false }
     }
 
     fn next_child(&mut self) -> Option<NodeIndex<Ix>> {
@@ -364,28 +423,46 @@ impl<'a, N, E, Ix: IndexType> TreeEdgesPostorder<'a, N, E, Ix> {
 }
 
 impl<'a, N: Clone, E, Ix: IndexType> Iterator for TreeEdgesPostorder<'a, N, E, Ix> {
-    type Item = (N, N);
+    type Item = (Option<N>, N, N);
 
     fn next(&mut self) -> Option<Self::Item> {
-        let mut depth = 0;
-        while let Some(child) = self.next_child() {
-            self.stack.push((
-                std::mem::replace(&mut self.node, child), 
-                std::mem::replace(&mut self.walker, self.tree.neighbors_undirected(child).detach())
-            ));
+        if !self.flag {
+            let mut depth = 0;
+            while let Some(child) = self.next_child() {
+                self.stack.push((
+                    std::mem::replace(&mut self.node, child), 
+                    std::mem::replace(&mut self.walker, self.tree.neighbors_undirected(child).detach())
+                ));
 
-            depth += 1;
-            if depth > self.tree.node_count() {
-                // Avoid blowing up the heap :)
-                panic!("cycle detected");
+                depth += 1;
+                if depth > self.tree.node_count() {
+                    // Avoid blowing up the heap :)
+                    panic!("cycle detected");
+                }
+            }
+
+            self.flag = true;
+            if self.twice {
+                self.walker = self.tree.neighbors_undirected(self.node).detach();
             }
         }
 
-        let (parent, walker) = self.stack.pop()?;
-        let child = self.node;
-        self.node = parent;
-        self.walker = walker;
-        Some((self.tree[parent].clone(), self.tree[child].clone()))
+        let (parent, child) = if let Some(child) = self.next_child() {
+            (self.node, child)
+        } else {
+            let (parent, walker) = self.stack.pop()?;
+            let child = self.node;
+            self.node = parent;
+            self.walker = walker;
+            self.flag = false;
+            (parent, child)
+        };
+        
+        Some((
+            self.stack.last().map(|&(grandparent, _)| self.tree[grandparent].clone()), 
+            self.tree[parent].clone(), 
+            self.tree[child].clone()
+        ))
     }
 }
 

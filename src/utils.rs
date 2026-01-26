@@ -1,31 +1,29 @@
-use std::fmt::Debug;
-use petgraph::{Graph, EdgeType, graph::NodeIndex};
+use std::fmt::{Debug, Write};
+use petgraph::{visit::{GraphProp, IntoNodeReferences, NodeIndexable, IntoEdgeReferences, EdgeRef, NodeRef}};
 use crate::{Circuit, CliffordBasis};
 
-pub fn graph_to_dot<'a, N2: Debug, E2: Debug, N, E, Ty: EdgeType>(
-    g: &'a Graph<N, E, Ty>,
-    nlab: impl Fn(NodeIndex, &'a N) -> Option<N2>,
-    elab: impl Fn(NodeIndex, NodeIndex, &'a E) -> Option<E2>
+pub fn graph_to_dot<G: GraphProp + IntoNodeReferences + NodeIndexable + IntoEdgeReferences, N: Debug, E: Debug>(
+    g: G,
+    nlab: impl Fn(G::NodeId, &G::NodeWeight) -> Option<N>,
+    elab: impl Fn(G::NodeId, G::NodeId, &G::EdgeWeight) -> Option<E>
 ) -> String {
-    use std::fmt::Write;
-    use petgraph::visit::EdgeRef;
-
     let arr = if g.is_directed() { "->" } else { "--" };
     let mut dot = if g.is_directed() { String::from("digraph G {\n  rankdir=LR;\n") } else { String::from("graph G {\n  rankdir=LR;\n") };
 
-    for node in g.node_indices() {
-        if let Some(label) = nlab(node, &g[node]) {
-            writeln!(&mut dot, "  n{} [label=\"{:?}\"];", node.index(), label).unwrap();
+    for nref in g.node_references() {
+        let node = nref.id();
+        if let Some(label) = nlab(node, nref.weight()) {
+            writeln!(&mut dot, "  n{} [label=\"{:?}\"];", g.to_index(node), label).unwrap();
         } else {
-            writeln!(&mut dot, "  n{};", node.index()).unwrap();
+            writeln!(&mut dot, "  n{};", g.to_index(node)).unwrap();
         }
     }
 
     for e in g.edge_references() {
         if let Some(label) = elab(e.source(), e.target(), e.weight()) {
-            writeln!(&mut dot, "  n{} {} n{} [label=\"{:?}\"];", e.source().index(), arr, e.target().index(), label).unwrap();
+            writeln!(&mut dot, "  n{} {} n{} [label=\"{:?}\"];", g.to_index(e.source()), arr, g.to_index(e.target()), label).unwrap();
         } else {
-            writeln!(&mut dot, "  n{} {} n{};", e.source().index(), arr, e.target().index()).unwrap();
+            writeln!(&mut dot, "  n{} {} n{};", g.to_index(e.source()), arr, g.to_index(e.target())).unwrap();
         }
     }
 
