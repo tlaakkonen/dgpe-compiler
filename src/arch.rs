@@ -51,9 +51,9 @@ impl GlobalArch {
         self.local.len()
     }
 
-    pub fn range(&self, idx: usize) -> impl Iterator<Item=usize> {
+    pub fn range(&self, idx: usize) -> impl Iterator<Item=LocalQubit> {
         let part = &self.parts[idx];
-        part.qubits.iter().map(|&i| part.topo[i].global)
+        part.qubits.iter().map(|&i| part.topo[i])
     }
 
     pub fn is_circuit_valid(&self, circuit: &Circuit) -> bool {

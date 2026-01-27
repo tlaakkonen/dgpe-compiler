@@ -45,7 +45,12 @@ impl std::fmt::Debug for PauliString {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.sign {
             write!(f, "-")?;
+        } else if f.sign_plus() {
+            write!(f, "+")?;
+        } else if f.sign_minus() {
+            write!(f, " ")?;
         }
+
         for i in 0..self.xs.len() {
             match (self.zs[i], self.xs[i]) {
                 (false, false) => write!(f, "I")?,
@@ -79,8 +84,13 @@ impl PauliString {
         PauliString { xs: vec![false; n], zs: vec![false; n], sign: false }
     }
 
+    /// NB: This function does not check for a sign!
     pub fn is_identity(&self) -> bool {
-        !(self.xs.iter().any(|&x| x) | self.zs.iter().any(|&z| z) | self.sign)
+        !(self.xs.iter().any(|&x| x) | self.zs.iter().any(|&z| z))
+    }
+
+    pub fn is_signed_identity(&self) -> bool {
+        !self.sign && self.is_identity()
     }
 
     pub fn with_i(mut self, i: usize) -> Self {
@@ -154,6 +164,11 @@ impl PauliString {
         self.h(a);
     }
 
+    pub fn swap_zx(mut self) -> Self {
+        std::mem::swap(&mut self.zs, &mut self.xs);
+        self
+    }
+
     pub fn commutes(&self, other: &PauliString) -> bool {
         let t1 = self.xs.iter().zip(&other.zs)
             .map(|(&x, &z)| x & z)
@@ -168,7 +183,7 @@ impl PauliString {
     /// Returns true if an extra i phase was produced, because they anticommute.
     /// Marked must_use because you should justify ignoring the phase!
     #[must_use]
-    fn mul_from(&mut self, rhs: &PauliString) -> bool {
+    pub fn mul_from(&mut self, rhs: &PauliString) -> bool {
         self.sign ^= rhs.sign;
         let mut phase = false;
         for i in 0..self.zs.len() {
@@ -227,6 +242,28 @@ impl PauliString {
     pub fn qubits(&self) -> usize {
         self.zs.len()
     }
+
+    // Try to find a single-qubit Pauli string which anticommutes with this one
+    pub fn qubit_anticommuting(&self) -> Option<PauliString> {
+        (0..self.qubits()).filter_map(|i| match self.get(i) {
+            Pauli::I => None,
+            Pauli::X | Pauli::Y => Some(PauliString::identity(self.qubits()).with_z(i)),
+            Pauli::Z => Some(PauliString::identity(self.qubits()).with_x(i))
+        }).next()
+    }
+
+    // Try to find a Pauli string which anticommutes with this one and commutes with the other
+    pub fn paired_anticommuting(&self, other: &PauliString) -> Option<PauliString> {
+        (0..self.qubits()).filter_map(|i| match (self.get(i), other.get(i)) {
+            (Pauli::Z, Pauli::I | Pauli::X) => Some(PauliString::identity(self.qubits()).with_x(i)),
+            (Pauli::Z, Pauli::Y) => Some(PauliString::identity(self.qubits()).with_y(i)),
+            (Pauli::X, Pauli::I | Pauli::Z) => Some(PauliString::identity(self.qubits()).with_z(i)),
+            (Pauli::X, Pauli::Y) => Some(PauliString::identity(self.qubits()).with_y(i)),
+            (Pauli::Y, Pauli::I | Pauli::Z) => Some(PauliString::identity(self.qubits()).with_z(i)),
+            (Pauli::Y, Pauli::X) => Some(PauliString::identity(self.qubits()).with_x(i)),
+            _ => None
+        }).next()
+    }
 }
 
 #[derive(Clone)]
@@ -241,11 +278,21 @@ pub struct CliffordBasis {
 
 impl Debug for CliffordBasis {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CliffordBasis")
-            .field("qubits", &self.qubits)
-            .field("stabs", &self.stabs)
-            .field("destabs", &self.destabs)
-            .finish_non_exhaustive()
+        writeln!(f, "CliffordBasis(qubits={},stabs={},destabs={}):", self.qubits, self.stabs.len(), self.destabs.len())?;
+        if self.stabs.len() == 0 && self.destabs.len() == 0 { return Ok(()) }
+        for i in 0..self.stabs.len().max(self.destabs.len()) {
+            if i < self.stabs.len() && i < self.destabs.len() {
+                write!(f, "{:-?} | {:-?}", self.stabs[i], self.destabs[i])?;
+            } else if i < self.stabs.len() {
+                write!(f, "{:-?} |", self.stabs[i])?;
+            } else {
+                write!(f, "{: <1$} | {2:-?}", "", self.qubits + 1, self.destabs[i])?;
+            }
+            if i < self.stabs.len().max(self.destabs.len()) - 1 {
+                writeln!(f)?;
+            }
+        }
+        Ok(())
     }
 }
 
