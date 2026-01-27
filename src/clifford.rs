@@ -58,17 +58,6 @@ impl std::fmt::Debug for PauliString {
     }
 }
 
-impl std::ops::MulAssign<&PauliString> for PauliString {
-    fn mul_assign(&mut self, rhs: &PauliString) {
-        let comm = self.commutes(rhs);
-        self.sign ^= rhs.sign ^ !comm;
-        for i in 0..self.zs.len() {
-            self.zs[i] ^= rhs.zs[i];
-            self.xs[i] ^= rhs.xs[i];
-        }
-    }
-}
-
 impl PauliString {
     pub fn random(n: usize) -> PauliString {
         let mut s = Self::identity(n);
@@ -173,6 +162,27 @@ impl PauliString {
             .map(|(&x, &z)| x & z)
             .fold(false, |a, b| a ^ b);
         !(t1 ^ t2)
+    }
+
+    /// Multiply a Pauli string into this one.
+    /// Returns true if an extra i phase was produced, because they anticommute.
+    /// Marked must_use because you should justify ignoring the phase!
+    #[must_use]
+    fn mul_from(&mut self, rhs: &PauliString) -> bool {
+        self.sign ^= rhs.sign;
+        let mut phase = false;
+        for i in 0..self.zs.len() {
+            let anti = self.zs[i] & rhs.xs[i] ^ self.xs[i] & rhs.zs[i];
+            let extra = (!self.zs[i] & !rhs.xs[i]) | (self.zs[i] & rhs.xs[i] & rhs.zs[i]) | (self.zs[i] & rhs.xs[i] & self.xs[i]);
+            if anti { 
+                phase = !phase;
+                if !phase ^ extra { self.sign = !self.sign; }
+            }
+
+            self.zs[i] ^= rhs.zs[i];
+            self.xs[i] ^= rhs.xs[i];
+        }
+        phase
     }
 
     pub fn from_vector(matrix: &Matrix) -> Self {
@@ -353,7 +363,8 @@ impl CliffordBasis {
         impl<'s> gf2_linalg::GaussRecorder for Rec<'s> {
             fn row_add(&mut self, s: usize, t: usize) {
                 let [source, target] = self.0.get_disjoint_mut([s, t]).unwrap();
-                *target *= source;
+                // Phases are irrelevant for finding a completion
+                let _ = target.mul_from(&source);
             }
 
             fn row_swap(&mut self, a: usize, b: usize) {
@@ -402,12 +413,14 @@ impl CliffordBasis {
             for j in i+2..pool.len() {
                 if !pool[j].commutes(&pool[i]) {
                     let [pj, pi] = pool.get_disjoint_mut([j, i+1]).unwrap();
-                    *pj *= pi;
+                    // Phases are irrelevant for finding a completion
+                    let _ = pj.mul_from(pi);
                 }
 
                 if !pool[j].commutes(&pool[i+1]) {
                     let [pj, pi] = pool.get_disjoint_mut([j, i]).unwrap();
-                    *pj *= pi;
+                    // Phases are irrelevant for finding a completion
+                    let _ = pj.mul_from(pi);
                 }
             }
             self.stabs.push(pool[i].clone());
