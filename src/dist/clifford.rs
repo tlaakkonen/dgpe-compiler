@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use gf2_linalg::{GF2, LinearSpace};
 
 use crate::{CliffordBasis, GlobalArch, NonlocalExp, PauliString};
@@ -134,7 +135,7 @@ impl BlockTableau {
                     let _ = sa.mul_from(string_a);
                 },
                 (false, false) => {
-                    // Both i phases because they anticommute.
+                    // Both i phases because they both anticommute.
                     // The phases multiply and cancel out with -1
                     let _ = sa.mul_from(string_a);
                     let _ = sb.mul_from(string_b);
@@ -148,41 +149,121 @@ impl BlockTableau {
         // println!("{:?}\n{:?}\n", exp, self);
     }
 
-    pub fn reduce_pair_sweep(&mut self, row: usize, col: usize, rec: &mut (impl NonlocalRecorder + ?Sized)) {
+    pub fn reduce_pair_sweep(&mut self, arch: Option<&GlobalArch>, row: usize, col: usize, rec: &mut (impl NonlocalRecorder + ?Sized)) {
         let mut comm_space = LinearSpace::empty(2*self.stabs[row][0].qubits());
         for col_q in self.indices[col]..self.indices[col+1] {
-            // Ensure that the target stabilizer is not contained in comm_space
-            if comm_space.contains(&self.stabs[row][col_q].to_vector().transpose()) {
-                let pivot = (0..self.parts).find(|&p| p != row && !self.stabs[p][col_q].is_identity()).unwrap();
-                let string_a = self.stabs[pivot][col_q].qubit_anticommuting().unwrap();
-                // Find a non-identity string that commutes with comm_space - by definition it is not contained within it
-                let string_b = PauliString::from_vector(&comm_space.basis().null_space().col(0)).swap_zx();
-                assert!(!comm_space.contains(&string_b.to_vector().transpose()));
-                let exp = NonlocalExp { idx_a: pivot, idx_b: row, string_a, string_b };
-                self.nonlocal_exp(&exp); rec.nonlocal_exp(&exp);
-            }
+            let arch_tree = if let Some(arch) = arch {
+                // Find a steiner tree for non-identity stabilizers rooted at the target 
+                let tree = arch.topo.steiner_forest((0..self.parts)
+                    .filter(|&p| p != row && !self.stabs[p][col_q].is_identity())
+                    .map(|p| arch.parts[p].idx), [arch.parts[row].idx]);
 
-            // Now reduce all non-target stabilizer strings to the identity 
+                // Fill up the tree. For non-target vertices, we just need them to be non-identity
+                // For the target vertex, we need it to not be contained in comm_space
+                for (_, parent, child) in tree.edges_postorder(arch.parts[row].idx, false) {
+                    let parent = arch.topo[parent];
+                    let child = arch.topo[child];
+                    let string_a = self.stabs[child][col_q].qubit_anticommuting().unwrap();
+                    if parent == row && comm_space.contains(&self.stabs[row][col_q].to_vector().transpose()) {
+                        // Find a non-identity string that commutes with comm_space - by definition it is not contained within it
+                        let string_b = PauliString::from_vector(&comm_space.basis().null_space().col(0)).swap_zx();
+                        assert!(!comm_space.contains(&string_b.to_vector().transpose()));
+                        let exp = NonlocalExp { idx_a: child, idx_b: parent, string_a, string_b };
+                        self.nonlocal_exp(&exp); rec.nonlocal_exp(&exp);
+                    } else if parent != row && self.stabs[parent][col_q].is_identity() {
+                        // It doesn't matter what we set the parent to so long as it is non-identity
+                        let exp = NonlocalExp { idx_a: child, idx_b: parent, string_b: string_a.clone(), string_a };
+                        self.nonlocal_exp(&exp); rec.nonlocal_exp(&exp);
+                    }
+                }
+
+                Some((arch, tree))
+            } else {
+                // Ensure that the target stabilizer is not contained in comm_space
+                if comm_space.contains(&self.stabs[row][col_q].to_vector().transpose()) {
+                    let pivot = (0..self.parts).find(|&p| p != row && !self.stabs[p][col_q].is_identity()).unwrap();
+                    let string_a = self.stabs[pivot][col_q].qubit_anticommuting().unwrap();
+                    // Find a non-identity string that commutes with comm_space - by definition it is not contained within it
+                    let string_b = PauliString::from_vector(&comm_space.basis().null_space().col(0)).swap_zx();
+                    assert!(!comm_space.contains(&string_b.to_vector().transpose()));
+                    let exp = NonlocalExp { idx_a: pivot, idx_b: row, string_a, string_b };
+                    self.nonlocal_exp(&exp); rec.nonlocal_exp(&exp);
+                }
+
+                None
+            };
+
             // Find string that commutes with comm_space and anticommutes with the target stabilizer
             let nsp = comm_space.basis().null_space();
             let comms = self.stabs[row][col_q].to_vector().transpose().dot(&nsp);
             let pivot = (0..nsp.num_cols()).find(|&i| comms[(0, i)] != GF2::ZERO).unwrap();
             let string_a = PauliString::from_vector(&nsp.col(pivot)).swap_zx();
             assert!(!string_a.commutes(&self.stabs[row][col_q]));
-            for p in 0..self.parts {
-                if p == row || self.stabs[p][col_q].is_identity() { continue }
-                let exp = NonlocalExp { idx_a: row, idx_b: p, string_a: string_a.clone(), string_b: self.stabs[p][col_q].clone() };
-                self.nonlocal_exp(&exp); rec.nonlocal_exp(&exp);
-            }
 
+            // Now reduce all non-target stabilizer strings to the identity 
+            if let Some((arch, tree)) = arch_tree {
+                for (_, parent, child) in tree.edges_postorder(arch.parts[row].idx, false) {
+                    let parent = arch.topo[parent];
+                    let child = arch.topo[child];
+                    
+                    let string_a = if parent == row { 
+                        string_a.clone() 
+                    } else {
+                        self.stabs[parent][col_q].qubit_anticommuting().unwrap()
+                    };
+                    let exp = NonlocalExp { idx_a: parent, idx_b: child, string_a, string_b: self.stabs[child][col_q].clone() };
+                    self.nonlocal_exp(&exp); rec.nonlocal_exp(&exp);
+                }
+            } else {
+                for p in 0..self.parts {
+                    if p == row || self.stabs[p][col_q].is_identity() { continue }
+                    let exp = NonlocalExp { idx_a: row, idx_b: p, string_a: string_a.clone(), string_b: self.stabs[p][col_q].clone() };
+                    self.nonlocal_exp(&exp); rec.nonlocal_exp(&exp);
+                }
+            }
+            
             // At this point we must have self.stabs[row][col_q] and self.destabs[row][col_q] 
             // anticommuting, hence self.destabs[row][col_q] cannot be the identity.
             assert!(!self.stabs[row][col_q].commutes(&self.destabs[row][col_q]));
+
             // Use stabs to eliminate all the non-target destabs
-            for p in 0..self.parts {
-                if p == row || self.destabs[p][col_q].is_identity() { continue }
-                let exp = NonlocalExp { idx_a: row, idx_b: p, string_a: self.stabs[row][col_q].clone(), string_b: self.destabs[p][col_q].clone() };
-                self.nonlocal_exp(&exp); rec.nonlocal_exp(&exp);
+            if let Some(arch) = arch {
+                // Find a steiner tree for non-identity destabilizers rooted at the target 
+                let tree = arch.topo.steiner_forest((0..self.parts)
+                    .filter(|&p| p != row && !self.destabs[p][col_q].is_identity())
+                    .map(|p| arch.parts[p].idx), [arch.parts[row].idx]);
+
+                // Fill up the tree, the target is already filled
+                for (_, parent, child) in tree.edges_postorder(arch.parts[row].idx, false) {
+                    let parent = arch.topo[parent];
+                    let child = arch.topo[child];
+                    if !self.destabs[parent][col_q].is_identity() { continue }
+                    assert_ne!(parent, row);
+                    let string_a = self.destabs[child][col_q].qubit_anticommuting().unwrap();
+                    let exp = NonlocalExp { idx_a: child, idx_b: parent, string_b: string_a.clone(), string_a };
+                    self.nonlocal_exp(&exp); rec.nonlocal_exp(&exp);
+                }
+
+                // Reduce the tree
+                for (_, parent, child) in tree.edges_postorder(arch.parts[row].idx, false) {
+                    let parent = arch.topo[parent];
+                    let child = arch.topo[child];
+                    let string_a = if parent == row {
+                        // This must anticommute with the target destab and commute with comm_space
+                        self.stabs[row][col_q].clone()
+                    } else {
+                        // Otherwise we don't care about comm_space, pick an arbitrary string
+                        self.destabs[parent][col_q].qubit_anticommuting().unwrap()
+                    };
+                    let exp = NonlocalExp { idx_a: parent, idx_b: child, string_a, string_b: self.destabs[child][col_q].clone() };
+                    self.nonlocal_exp(&exp); rec.nonlocal_exp(&exp);
+                }
+            } else {
+                for p in 0..self.parts {
+                    if p == row || self.destabs[p][col_q].is_identity() { continue }
+                    let exp = NonlocalExp { idx_a: row, idx_b: p, string_a: self.stabs[row][col_q].clone(), string_b: self.destabs[p][col_q].clone() };
+                    self.nonlocal_exp(&exp); rec.nonlocal_exp(&exp);
+                }
             }
 
             // Fix signs
@@ -198,22 +279,26 @@ impl BlockTableau {
             comm_space.push(&self.stabs[row][col_q].to_vector().transpose());
             comm_space.push(&self.destabs[row][col_q].to_vector().transpose());
         }
+    }
 
-        for p in 0..self.parts {
-            if p != row {
-                for col_q in self.indices[col]..self.indices[col+1] {
-                    assert!(self.stabs[p][col_q].is_identity());
-                    assert!(self.destabs[p][col_q].is_identity());
-                }
-            } else {
-                for i in self.indices[col]..self.indices[col+1] {
-                    assert!(!self.stabs[p][i].commutes(&self.destabs[p][i]));
-                    for j in self.indices[col]..self.indices[col+1] {
-                        if i == j { continue }
-                        assert!(self.stabs[p][i].commutes(&self.stabs[p][j]));
-                        assert!(self.stabs[p][i].commutes(&self.destabs[p][j]));
-                        assert!(self.destabs[p][i].commutes(&self.stabs[p][j]));
-                        assert!(self.destabs[p][i].commutes(&self.destabs[p][j]));
+    fn verify_solved(&self) {
+        for col in 0..self.parts {
+            for row in 0..self.parts {
+                if row != col {
+                    for col_q in self.indices[col]..self.indices[col+1] {
+                        assert!(self.stabs[row][col_q].is_identity());
+                        assert!(self.destabs[row][col_q].is_identity());
+                    }
+                } else {
+                    for i in self.indices[col]..self.indices[col+1] {
+                        assert!(!self.stabs[row][i].commutes(&self.destabs[row][i]));
+                        for j in self.indices[col]..self.indices[col+1] {
+                            if i == j { continue }
+                            assert!(self.stabs[row][i].commutes(&self.stabs[row][j]));
+                            assert!(self.stabs[row][i].commutes(&self.destabs[row][j]));
+                            assert!(self.destabs[row][i].commutes(&self.stabs[row][j]));
+                            assert!(self.destabs[row][i].commutes(&self.destabs[row][j]));
+                        }
                     }
                 }
             }
@@ -221,10 +306,38 @@ impl BlockTableau {
     }
 
     pub fn synthesize(&mut self, rec: &mut (impl NonlocalRecorder + ?Sized)) {
-        // println!("{:?}\n", self);
         for row in 0..self.parts {
-            self.reduce_pair_sweep(row, row, rec);
+            self.reduce_pair_sweep(None, row, row, rec);
         }
+
+        self.verify_solved();
+    }
+
+    pub fn synthesize_constrained(&mut self, arch: &GlobalArch, rec: &mut (impl NonlocalRecorder + ?Sized)) {
+        let mut arch = arch.clone();
+        let mut visited = HashSet::new();
+        for _ in 0..self.parts {
+            let cost_fn = |r: usize| {
+                (0..self.qubits).map(|i| {
+                    let s = (self.indices[r]..self.indices[r+1]).any(|c| !self.stabs[i][c].is_identity()) as usize;
+                    let d = (self.indices[r]..self.indices[r+1]).any(|c| !self.destabs[i][c].is_identity()) as usize;
+                    if s + d == 0 { 0 } else {
+                        arch.topo.distance_between(arch.parts[r].idx, arch.parts[i].idx).unwrap() * (s + d)
+                    }
+                }).sum::<usize>()
+            };
+
+            let pivot = (0..self.parts)
+                .filter(|&p| !visited.contains(&p))
+                .filter(|&p| !arch.topo.is_cutting(arch.parts[p].idx))
+                .min_by_key(|&p| cost_fn(p))
+                .unwrap();
+            self.reduce_pair_sweep(Some(&arch), pivot, pivot, rec);
+            visited.insert(pivot);
+            arch.topo.delete_vertex(arch.parts[pivot].idx);
+        }
+
+        self.verify_solved();
     }
 }
 

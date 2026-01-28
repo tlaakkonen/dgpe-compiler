@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use petgraph::{graph::UnGraph, stable_graph::{IndexType, NodeIndex, StableDiGraph, StableUnGraph, WalkNeighbors}, visit::{EdgeRef, IntoEdgeReferences, NodeFiltered}};
 
-use crate::{Circuit, Gate};
+use crate::{Circuit, Gate, NonlocalExp};
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LocalQubit {
@@ -78,6 +78,15 @@ impl GlobalArch {
         }
 
         true
+    }
+
+    pub fn is_exps_valid(&self, exps: &[NonlocalExp]) -> bool {
+        exps.iter()
+            .all(|exp| {
+                self.topo.graph
+                    .find_edge_undirected(self.parts[exp.idx_a].idx, self.parts[exp.idx_b].idx)
+                    .is_some()
+            })
     }
 
     pub fn all_to_all(k: usize, q: usize) -> GlobalArch {

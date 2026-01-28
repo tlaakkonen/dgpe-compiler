@@ -730,10 +730,20 @@ impl CliffordBasis {
         let mut visited = HashSet::new();
         let mut arch = arch.clone();
         for _ in 0..self.qubits {
+            let cost_fn = |r: usize| {
+                (0..self.qubits).map(|i| {
+                    let s = (self.stabs[r].get(i) != Pauli::I) as usize;
+                    let d = (self.destabs[r].get(i) != Pauli::I) as usize;
+                    if s + d == 0 { 0 } else {
+                        arch.topo.distance_between(arch.qubits[r], arch.qubits[i]).unwrap() * (s + d)
+                    }
+                }).sum::<usize>()
+            };
+
             let pivot = (0..self.qubits)
                 .filter(|i| !visited.contains(i))
                 .filter(|&i| !arch.topo.is_cutting(arch.qubits[i]))
-                .min_by_key(|&i| self.stabs[i].weight() + self.destabs[i].weight())
+                .min_by_key(|&i| cost_fn(i))
                 .unwrap();
 
             self.reduce_pair_sweep(Some(&arch), pivot, pivot, rec);
