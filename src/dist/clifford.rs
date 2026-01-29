@@ -146,7 +146,6 @@ impl BlockTableau {
 
     pub fn nonlocal_exp(&mut self, exp: &NonlocalExp) {
         self.nonlocal_exp_ref(exp.idx_a, exp.idx_b, &exp.string_a, &exp.string_b);
-        // println!("{:?}\n{:?}\n", exp, self);
     }
 
     pub fn reduce_pair_sweep(&mut self, arch: Option<&GlobalArch>, row: usize, col: usize, rec: &mut (impl NonlocalRecorder + ?Sized)) {
@@ -281,7 +280,7 @@ impl BlockTableau {
         }
     }
 
-    fn verify_solved(&self) {
+    pub fn verify_solved(&self) {
         for col in 0..self.parts {
             for row in 0..self.parts {
                 if row != col {
@@ -318,7 +317,7 @@ impl BlockTableau {
         let mut visited = HashSet::new();
         for _ in 0..self.parts {
             let cost_fn = |r: usize| {
-                (0..self.qubits).map(|i| {
+                (0..self.parts).map(|i| {
                     let s = (self.indices[r]..self.indices[r+1]).any(|c| !self.stabs[i][c].is_identity()) as usize;
                     let d = (self.indices[r]..self.indices[r+1]).any(|c| !self.destabs[i][c].is_identity()) as usize;
                     if s + d == 0 { 0 } else {

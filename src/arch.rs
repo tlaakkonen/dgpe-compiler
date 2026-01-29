@@ -401,6 +401,20 @@ impl SteinerForest {
         let root = self.forest.node_indices().find(|&r| self.forest[r] == root).unwrap();
         TreeEdgesPostorder::new(&self.forest, root, twice)
     }
+
+    pub fn edges_preorder(&self, root: NodeIndex) -> impl Iterator<Item=(Option<NodeIndex>, NodeIndex, NodeIndex)> {
+        let root = self.forest.node_indices().find(|&r| self.forest[r] == root).unwrap();
+        TreeEdgesPreorder::new(&self.forest, root)
+    }
+
+    pub fn children(&self, node: NodeIndex, parent: NodeIndex) -> impl Iterator<Item=NodeIndex> {
+        let node = self.forest.node_indices().find(|&r| self.forest[r] == node).unwrap();
+        let parent = self.forest.node_indices().find(|&r| self.forest[r] == parent).unwrap();
+        assert!(node != parent && self.forest.find_edge_undirected(node, parent).is_some());
+        self.forest.neighbors_undirected(node)
+            .filter(move |&child| child != parent)
+            .map(|child| self.forest[child])
+    }
 }
 
 /// Iterator to traverse the edges of a tree in post-order from a root. 
@@ -470,6 +484,66 @@ impl<'a, N: Clone, E, Ix: IndexType> Iterator for TreeEdgesPostorder<'a, N, E, I
         Some((
             self.stack.last().map(|&(grandparent, _)| self.tree[grandparent].clone()), 
             self.tree[parent].clone(), 
+            self.tree[child].clone()
+        ))
+    }
+}
+
+/// Iterator to traverse the edges of a tree in pre-order from a root. 
+/// Assumes that the tree is undirected and has no parallel edges, 
+/// and will panic or return incorrect results if this is not true.
+struct TreeEdgesPreorder<'a, N, E, Ix> {
+    stack: Vec<(NodeIndex<Ix>, WalkNeighbors<Ix>)>,
+    node: NodeIndex<Ix>,
+    walker: WalkNeighbors<Ix>,
+    tree: &'a StableUnGraph<N, E, Ix>
+}
+
+impl<'a, N, E, Ix: IndexType> TreeEdgesPreorder<'a, N, E, Ix> {
+    fn new(tree: &'a StableUnGraph<N, E, Ix>, root: NodeIndex<Ix>) -> Self {
+        TreeEdgesPreorder { stack: Vec::new(), node: root, walker: tree.neighbors_undirected(root).detach(), tree }
+    }
+
+    fn next_child(&mut self) -> Option<NodeIndex<Ix>> {
+        let parent = self.stack.last().map(|&(p, _)| p);
+        let node = self.walker.next_node(&self.tree)?;
+        if Some(node) != parent {
+            Some(node)
+        } else {
+            self.walker.next_node(&self.tree)
+        }
+    }
+}
+
+impl<'a, N: Clone, E, Ix: IndexType> Iterator for TreeEdgesPreorder<'a, N, E, Ix> {
+    type Item = (Option<N>, N, N);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let child = loop {
+            if let Some(child) = self.next_child() {
+                break child
+            } else if let Some((parent, walker)) = self.stack.pop() {
+                self.node = parent;
+                self.walker = walker;
+            } else {
+                return None
+            }
+        };
+        let grandparent = self.stack.last().map(|&(n, _)| n);
+        let parent = self.node;
+
+        self.stack.push((
+            std::mem::replace(&mut self.node, child), 
+            std::mem::replace(&mut self.walker, self.tree.neighbors_undirected(child).detach())
+        ));
+
+        if self.stack.len() > self.tree.node_count() {
+            panic!("cycle detected")
+        }
+
+        Some((
+            grandparent.map(|n| self.tree[n].clone()),
+            self.tree[parent].clone(),
             self.tree[child].clone()
         ))
     }

@@ -781,6 +781,17 @@ impl CliffordBasis {
         basis.apply_gates(circ.gates.iter().copied())?;
         Some(basis)
     }
+
+    /// Finds the parity matrix of a CNOT circuit which would generate this tableau, if one exists
+    pub fn to_parity_matrix(&self) -> Option<Matrix> {
+        if self.stabs.iter().any(|s| s.sign || s.xs.iter().any(|&x| x)) 
+            || self.destabs.iter().any(|s| s.sign || s.zs.iter().any(|&z| z))
+            || !self.is_symplectic() {
+            None
+        } else {
+            Some(self.destabilizer_mat().slice(self.qubits.., ..))
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
