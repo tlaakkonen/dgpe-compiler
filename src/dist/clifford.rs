@@ -60,9 +60,9 @@ impl std::fmt::Debug for BlockTableau {
 }
 
 impl BlockTableau {
-    pub fn new(basis: &CliffordBasis, arch: &GlobalArch) -> BlockTableau {
-        assert!(basis.is_symplectic());
-        assert_eq!(arch.qubits(), basis.qubits);
+    pub fn new(tableau: &CliffordBasis, arch: &GlobalArch) -> BlockTableau {
+        assert!(tableau.is_symplectic());
+        assert_eq!(arch.qubits(), tableau.qubits);
 
         let mut stabs = vec![Vec::new(); arch.num_parts()];
         let mut destabs = vec![Vec::new(); arch.num_parts()];
@@ -72,21 +72,49 @@ impl BlockTableau {
             for i in (0..arch.num_parts()).map(|j| arch.range(j)).flatten() {
                 let i = i.global;
                 stabs[p].push(arch.range(p)
-                    .map(|q| (q, basis.stabs[i].get(q.global)))
+                    .map(|q| (q, tableau.stabs[i].get(q.global)))
                     .fold(PauliString::identity(arch.part_size(p)), |s, (q, p)| {
                         s.with(p, q.offset)
                     })
-                    .with_sign(if p == 0 { basis.stabs[i].sign } else { false }));
+                    .with_sign(if p == 0 { tableau.stabs[i].sign } else { false }));
                 destabs[p].push(arch.range(p)
-                    .map(|q| (q, basis.destabs[i].get(q.global)))
+                    .map(|q| (q, tableau.destabs[i].get(q.global)))
                     .fold(PauliString::identity(arch.part_size(p)), |s, (q, p)| {
                         s.with(p, q.offset)
                     })
-                    .with_sign(if p == 0 { basis.destabs[i].sign } else { false }));
+                    .with_sign(if p == 0 { tableau.destabs[i].sign } else { false }));
             }
         }
 
         BlockTableau { indices, stabs, destabs, qubits: arch.qubits(), parts: arch.num_parts() }
+    }
+
+    pub fn to_tableau(&self) -> CliffordBasis {
+        let mut basis = CliffordBasis::empty(self.qubits);
+        for c in 0..self.parts {
+            for j in self.indices[c]..self.indices[c+1] {
+                let mut sign = false;
+                let (zs, xs) = (0..self.parts)
+                    .flat_map(|r| {
+                        sign ^= self.stabs[r][j].sign;
+                        self.stabs[r][j].zs.iter().copied().zip(self.stabs[r][j].xs.iter().copied())
+                    })
+                    .collect::<(Vec<_>, Vec<_>)>();
+                let stab = PauliString { zs, xs, sign };
+                basis.add_stabilizer(stab);
+
+                let mut sign = false;
+                let (zs, xs) = (0..self.parts)
+                    .flat_map(|r| {
+                        sign ^= self.destabs[r][j].sign;
+                        self.destabs[r][j].zs.iter().copied().zip(self.destabs[r][j].xs.iter().copied())
+                    })
+                    .collect::<(Vec<_>, Vec<_>)>();
+                let destab = PauliString { zs, xs, sign };
+                basis.add_destabilizer(destab);
+            }
+        }
+        basis
     }
 
     pub fn local_cx(&mut self, p: usize, i: usize, j: usize) {
@@ -305,8 +333,22 @@ impl BlockTableau {
     }
 
     pub fn synthesize(&mut self, rec: &mut (impl NonlocalRecorder + ?Sized)) {
+        let mut visited = HashSet::new();
         for row in 0..self.parts {
+            let cost_fn = |r: usize| {
+                (0..self.parts).map(|i| {
+                    let s = (self.indices[r]..self.indices[r+1]).any(|c| !self.stabs[i][c].is_identity()) as usize;
+                    let d = (self.indices[r]..self.indices[r+1]).any(|c| !self.destabs[i][c].is_identity()) as usize;
+                    s + d
+                }).sum::<usize>()
+            };
+
+            let pivot = (0..self.parts)
+                .filter(|&p| !visited.contains(&p))
+                .min_by_key(|&p| cost_fn(p))
+                .unwrap();
             self.reduce_pair_sweep(None, row, row, rec);
+            visited.insert(pivot);
         }
 
         self.verify_solved();
