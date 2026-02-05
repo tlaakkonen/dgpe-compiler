@@ -132,6 +132,11 @@ impl PauliString {
         Pauli::new(self.zs[i], self.xs[i])
     }
 
+    pub fn set(&mut self, i: usize, p: Pauli) {
+        self.zs[i] = p.z();
+        self.xs[i] = p.x();
+    }
+
     pub fn cx(&mut self, a: usize, b: usize) {
         self.sign ^= self.xs[a] & self.zs[b] & (self.xs[b] ^ self.zs[a] ^ true);
         self.xs[b] ^= self.xs[a];
@@ -179,25 +184,35 @@ impl PauliString {
         !(t1 ^ t2)
     }
 
-    /// Multiply a Pauli string into this one.
+    pub fn unsigned_eq(&self, other: &PauliString) -> bool {
+        self.xs == other.xs && self.zs == other.zs
+    }
+
+    /// Multiply a Pauli string into this one from the right. 
     /// Returns true if an extra i phase was produced, because they anticommute.
     /// Marked must_use because you should justify ignoring the phase!
     #[must_use]
     pub fn mul_from(&mut self, rhs: &PauliString) -> bool {
+        use Pauli::{I, X, Y, Z};
         self.sign ^= rhs.sign;
-        let mut phase = false;
-        for i in 0..self.zs.len() {
-            let anti = self.zs[i] & rhs.xs[i] ^ self.xs[i] & rhs.zs[i];
-            let extra = (!self.zs[i] & !rhs.xs[i]) | (self.zs[i] & rhs.xs[i] & rhs.zs[i]) | (self.zs[i] & rhs.xs[i] & self.xs[i]);
-            if anti { 
-                phase = !phase;
-                if !phase ^ extra { self.sign = !self.sign; }
+        let mut phase: usize = 0;
+        for i in 0..self.qubits() {
+            match (self.get(i), rhs.get(i)) {
+                (I, p) => self.set(i, p), 
+                (_, I) => (),
+                (Z, Z) | (X, X) | (Y, Y) => self.set(i, I),
+                (Z, X) => { phase += 1; self.set(i, Y); },
+                (Z, Y) => { phase += 3; self.set(i, X); },
+                (X, Z) => { phase += 3; self.set(i, Y); },
+                (X, Y) => { phase += 1; self.set(i, Z); },
+                (Y, Z) => { phase += 1; self.set(i, X); },
+                (Y, X) => { phase += 3; self.set(i, Z); }
             }
-
-            self.zs[i] ^= rhs.zs[i];
-            self.xs[i] ^= rhs.xs[i];
         }
-        phase
+        if phase & 2 != 0 {
+            self.sign = !self.sign;
+        }
+        phase % 2 != 0
     }
 
     pub fn from_vector(matrix: &Matrix) -> Self {
@@ -243,7 +258,7 @@ impl PauliString {
         self.zs.len()
     }
 
-    // Try to find a single-qubit Pauli string which anticommutes with this one
+    /// Try to find a single-qubit Pauli string which anticommutes with this one
     pub fn qubit_anticommuting(&self) -> Option<PauliString> {
         (0..self.qubits()).filter_map(|i| match self.get(i) {
             Pauli::I => None,
@@ -252,17 +267,37 @@ impl PauliString {
         }).next()
     }
 
-    // Try to find a Pauli string which anticommutes with this one and commutes with the other
-    pub fn paired_anticommuting(&self, other: &PauliString) -> Option<PauliString> {
-        (0..self.qubits()).filter_map(|i| match (self.get(i), other.get(i)) {
-            (Pauli::Z, Pauli::I | Pauli::X) => Some(PauliString::identity(self.qubits()).with_x(i)),
-            (Pauli::Z, Pauli::Y) => Some(PauliString::identity(self.qubits()).with_y(i)),
-            (Pauli::X, Pauli::I | Pauli::Z) => Some(PauliString::identity(self.qubits()).with_z(i)),
-            (Pauli::X, Pauli::Y) => Some(PauliString::identity(self.qubits()).with_y(i)),
-            (Pauli::Y, Pauli::I | Pauli::Z) => Some(PauliString::identity(self.qubits()).with_z(i)),
-            (Pauli::Y, Pauli::X) => Some(PauliString::identity(self.qubits()).with_x(i)),
-            _ => None
-        }).next()
+    /// Find a set of gates which diagonalizes this string
+    pub fn diagonalize(&mut self, arch: &LocalArch) -> Vec<Gate> {
+        let mut gates = Vec::new();
+
+        for i in 0..self.qubits() {
+            let li = arch.from_offset(i).global;
+            match self.get(i) {
+                Pauli::I | Pauli::Z => (),
+                Pauli::X => {
+                    self.h(i);
+                    gates.push(Gate::H(li));
+                },
+                Pauli::Y => {
+                    self.s(i);
+                    self.h(i);
+                    gates.push(Gate::S(li));
+                    gates.push(Gate::H(li));
+                }
+            }
+        }
+        
+        let Some(pivot) = self.zs.iter().position(|&z| z) else { return gates };
+        let lpivot = arch.from_offset(pivot).global;
+        for i in 0..self.qubits() {
+            if i == pivot || self.get(i) == Pauli::I { continue }
+            let li = arch.from_offset(i).global;
+            self.cx(i, pivot);
+            gates.push(Gate::CX(li, lpivot));
+        }
+
+        gates
     }
 }
 
@@ -322,6 +357,7 @@ impl CliffordBasis {
             let di = &self.destabs[i];
             if !si.zs[i] || si.xs[i] || !di.xs[i] || di.zs[i] { return false }
             if si.weight() != 1 || di.weight() != 1 { return false }
+            if si.sign || di.sign { return false }
         }
         true
     }

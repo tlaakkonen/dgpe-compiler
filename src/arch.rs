@@ -27,6 +27,12 @@ pub struct LocalArch {
     pub topo: APSP<LocalQubit, ()>
 }
 
+impl LocalArch {
+    pub fn from_offset(&self, offset: usize) -> LocalQubit {
+        self.topo[self.qubits[offset]]
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GlobalArch {
     pub local: Vec<LocalQubit>,

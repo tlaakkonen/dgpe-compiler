@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use gf2_linalg::{GF2, Matrix};
-use crate::{GlobalArch, NonlocalExp, PauliString, dist::NonlocalRecorder};
+use crate::{GlobalArch, LocalArch, NonlocalExp, PauliString, dist::NonlocalRecorder};
 
 #[derive(Clone)]
 pub struct BlockMatrix {
@@ -350,7 +350,8 @@ impl BlockMatrix {
                     let s = if i == r { n - bs.rank() } else { bs.rank() };
                     let d = if i == r { n - bd.rank() } else { bd.rank() };
                     if s + d == 0 { 0 } else {
-                        arch.topo.distance_between(arch.parts[r].idx, arch.parts[i].idx).unwrap() * (s + d)
+                        let part: &LocalArch = &arch.parts[r];
+                        arch.topo.distance_between(part.idx, arch.parts[i].idx).unwrap() * (s + d)
                     }
                 }).sum::<usize>();
 

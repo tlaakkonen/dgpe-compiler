@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fmt::Debug};
+use std::fmt::Debug;
 use petgraph::graph::{DiGraph, NodeIndex};
 use crate::{GlobalArch, LocalQubit, PauliString};
 
@@ -79,6 +79,30 @@ impl PauliExp {
             PauliExp::Nonlocal(nonlocal) => nonlocal.weight()
         }
     }
+
+    pub fn push_clifford(&mut self, cliff: &PhaseExp) {
+        match self {
+            PauliExp::Phase(p) => p.push_clifford(cliff),
+            PauliExp::Nonlocal(n) => n.push_clifford(cliff)
+        }
+    }
+
+    /// Find a naive set of gates that implement this PauliExp.
+    /// Does not respect architecture constraints.
+    pub fn to_gates_naive(&self, arch: &GlobalArch) -> Vec<Gate> {
+        match self {
+            PauliExp::Phase(p) => p.to_gates_naive(arch),
+            PauliExp::Nonlocal(n) => n.to_gates_naive(arch)
+        }
+    }
+
+    /// Checks if there is a *local* Clifford operation
+    pub fn is_clifford(&self) -> bool {
+        match self {
+            PauliExp::Phase(p) => p.is_clifford(),
+            PauliExp::Nonlocal(_) => false
+        }
+    }
 }
 
 impl Debug for PauliExp {
@@ -119,6 +143,73 @@ impl PhaseExp {
 
     pub fn weight(&self) -> usize {
         self.string.weight()
+    }
+
+    pub fn commutes(&self, other: &PhaseExp) -> bool {
+        if self.idx != other.idx {
+            return true
+        }
+
+        return self.string.commutes(&other.string)
+    }
+
+    pub fn is_clifford(&self) -> bool {
+        self.phase % 2 == 0
+    }
+
+    /// Push a Clifford PhaseExp through this one, left to right
+    pub fn push_clifford(&mut self, cliff: &PhaseExp) {
+        assert!(cliff.is_clifford());
+
+        if self.commutes(cliff) {
+            return
+        }
+        
+        if (cliff.phase / 2) % 2 == 1 {
+            // We know that they anticommute, can ignore phase
+            let _ = self.string.mul_from(&cliff.string);
+            // self.string.sign = !self.string.sign;
+        }
+
+        if (cliff.phase / 4) % 2 == 1 {
+            self.string.sign = !self.string.sign;
+        }
+    }
+
+    /// Find a naive set of gates that implement this PhaseExp.
+    /// Does not respect architecture constraints.
+    pub fn to_gates_naive(&self, arch: &GlobalArch) -> Vec<Gate> {
+        if self.string.is_identity() || (self.phase % 8) == 0 {
+            return Vec::new()
+        }
+
+        let part = &arch.parts[self.idx];
+        let mut s = self.string.clone();
+        let diag = s.diagonalize(part);
+        let mut gates = diag.clone();
+        let qpivot = part.from_offset(s.zs.iter().position(|&z| z).unwrap());
+        let phase = if s.sign { (8 - (self.phase % 8)) % 8 } else { self.phase % 8 };
+        match phase {
+            1 => gates.push(Gate::T(qpivot.global)),
+            2 => gates.push(Gate::S(qpivot.global)),
+            3 => {
+                gates.push(Gate::S(qpivot.global));
+                gates.push(Gate::T(qpivot.global));
+            },
+            4 => gates.push(Gate::Z(qpivot.global)),
+            5 => {
+                gates.push(Gate::Z(qpivot.global));
+                gates.push(Gate::T(qpivot.global));
+            },
+            6 => gates.push(Gate::Sdg(qpivot.global)),
+            7 => {
+                gates.push(Gate::Sdg(qpivot.global));
+                gates.push(Gate::T(qpivot.global));
+            },
+            _ => unreachable!()
+        }
+        gates.extend(diag.iter().rev().flat_map(|g| g.iter_inverse()));
+        gates
     }
 }
 
@@ -172,6 +263,66 @@ impl NonlocalExp {
         let ba = if self.idx_b == other.idx_a { self.string_b.commutes(&other.string_a) } else { true };
         let bb = if self.idx_b == other.idx_b { self.string_b.commutes(&other.string_b) } else { true };
         aa && ab && ba && bb
+    }
+
+    /// Push a Clifford NonlocalExp through this, left to right
+    pub fn push_clifford(&mut self, cliff: &PhaseExp) {
+        assert!(cliff.is_clifford());
+
+        let str = if cliff.idx == self.idx_a {
+            &mut self.string_a
+        } else if cliff.idx == self.idx_b {
+            &mut self.string_b
+        } else {
+            return
+        };
+
+        if str.commutes(&cliff.string) {
+            return
+        }
+
+        if (cliff.phase / 2) % 2 == 1 {
+            // We know that they anticommute, can ignore phase
+            let _ = str.mul_from(&cliff.string);
+        }
+
+        if (cliff.phase / 4) % 2 == 1 {
+            str.sign = !str.sign;
+        }
+    }
+
+    /// Find a naive set of gates that implement this NonlocalExp.
+    /// Does not respect architecture constraints.
+    pub fn to_gates_naive(&self, arch: &GlobalArch) -> Vec<Gate> {
+        let mut gates = Vec::new();
+
+        let mut sa = self.string_a.clone();
+        let da = sa.diagonalize(&arch.parts[self.idx_a]);
+        gates.extend_from_slice(&da);
+
+        let mut sb = self.string_b.clone();
+        let db = sb.diagonalize(&arch.parts[self.idx_b]);
+        gates.extend_from_slice(&db);
+
+        let pa = sa.zs.iter().position(|&z| z).map(|p| arch.parts[self.idx_a].from_offset(p));
+        let pb = sb.zs.iter().position(|&z| z).map(|p| arch.parts[self.idx_b].from_offset(p));
+        match (pa, pb) {
+            (None, None) => (),
+            (Some(qa), None) => if sb.sign { gates.push(Gate::Z(qa.global)) },
+            (None, Some(qb)) => if sa.sign { gates.push(Gate::Z(qb.global)) },
+            (Some(qa), Some(qb)) => {
+                if sb.sign { gates.push(Gate::Z(qa.global)) }
+                if sa.sign { gates.push(Gate::Z(qb.global)) }
+                gates.push(Gate::H(qb.global));
+                gates.push(Gate::CX(qa.global, qb.global));
+                gates.push(Gate::H(qb.global));
+            }
+        }
+
+        gates.extend(da.iter().rev().flat_map(|g| g.iter_inverse()));
+        gates.extend(db.iter().rev().flat_map(|g| g.iter_inverse()));
+
+        gates
     }
 }
 
@@ -254,6 +405,34 @@ impl Circuit {
         self.gates.extend_from_slice(&other.gates);
     }
 
+    pub fn s(&mut self, i: usize) {
+        self.gates.push(Gate::S(i));
+    }
+
+    pub fn sdg(&mut self, i: usize) {
+        self.gates.push(Gate::Sdg(i));
+    }
+
+    pub fn z(&mut self, i: usize) {
+        self.gates.push(Gate::Z(i));
+    }
+
+    pub fn x(&mut self, i: usize) {
+        self.gates.push(Gate::X(i));
+    }
+
+    pub fn t(&mut self, i: usize) {
+        self.gates.push(Gate::T(i));
+    }
+
+    pub fn h(&mut self, i: usize) {
+        self.gates.push(Gate::H(i));
+    }
+
+    pub fn cx(&mut self, i: usize, j: usize) {
+        self.gates.push(Gate::CX(i, j));
+    }
+
     pub fn qasm(&self) -> String {
         use std::fmt::Write;
         let mut buffer = String::new();
@@ -271,6 +450,27 @@ impl Circuit {
             }.unwrap();
         }
         buffer
+    }
+
+    pub fn qc(&self) -> String {
+        use std::fmt::Write;
+        let mut out = String::new();
+        for &g in &self.gates {
+            match g {
+                Gate::X(q) => writeln!(&mut out, "X p{q}"),
+                Gate::CX(c, t) => writeln!(&mut out, "cnot p{c} p{t}"),
+                Gate::T(q) => writeln!(&mut out, "T p{q}"),
+                Gate::S(q) => writeln!(&mut out, "S p{q}"),
+                Gate::Z(q) => writeln!(&mut out, "Z p{q}"),
+                Gate::Sdg(q) => writeln!(&mut out, "Z p{q}\nS p{q}"),
+                Gate::H(q) => writeln!(&mut out, "H p{q}")
+            }.unwrap()
+        }
+        let qs = (0..=self.qubits)
+                .map(|i| format!("p{}", i))
+                .collect::<Vec<_>>()
+                .join(" ");
+        format!(".v {}\n.i {}\nBEGIN\n{}\nEND", qs, qs, out)
     }
 
     pub fn partition(&self, arch: &GlobalArch) -> PartitionedCircuit {
@@ -320,8 +520,8 @@ impl Circuit {
                         };
                         match gate {
                             Gate::H(_) => string.h(q.offset),
-                            Gate::S(_) => string.s(q.offset),
-                            Gate::Sdg(_) => string.sdg(q.offset),
+                            Gate::S(_) => string.sdg(q.offset),
+                            Gate::Sdg(_) => string.s(q.offset),
                             Gate::Z(_) => string.z(q.offset),
                             Gate::X(_) => string.x(q.offset),
                             _ => unreachable!()
@@ -339,39 +539,75 @@ impl Circuit {
 }
 
 #[derive(Debug, Clone)]
-pub struct Bin<S> {
-    pub nodes: Vec<NodeIndex>,
-    pub state: S
-}
-
-#[derive(Debug, Clone)]
-pub struct PartitionedCircuit<S=()> {
+pub struct PartitionedCircuit {
     pub arch: GlobalArch,
     pub dag: DiGraph<PauliExp, ()>,
-    pub bins: Vec<Bin<S>>,
     pub tail: Circuit
 }
 
 impl PartitionedCircuit {
     pub fn new(arch: GlobalArch, exps: Vec<PauliExp>, tail: Circuit) -> PartitionedCircuit {
-        let mut sets = Vec::new();
         let mut nodes = Vec::new();
         let mut dag = DiGraph::new();
-        for (i, exp) in exps.into_iter().rev().enumerate() {
+        for (i, exp) in exps.into_iter().enumerate() {
             nodes.push(dag.add_node(exp));
-            let mut set = HashSet::new();
-            set.insert(i);
-            for j in (0..i).rev() {
-                if set.contains(&j) || dag[nodes[i]].commutes(&dag[nodes[j]]) { continue; }
-                dag.add_edge(nodes[i], nodes[j], ());
-                set.extend(&sets[j]);
+            for j in 0..i {
+                if !dag[nodes[j]].commutes(&dag[nodes[i]]) {
+                    dag.add_edge(nodes[j], nodes[i], ());
+                }
             }
-            sets.push(set);
         }
 
-        nodes.reverse();
-        let bin = Bin { state: (), nodes };
+        PartitionedCircuit { arch, dag, tail }
+    }
 
-        PartitionedCircuit { arch, dag, tail, bins: vec![bin] }
+    pub fn tcount(&self) -> usize {
+        self.dag.node_weights().filter(|&n| {
+            matches!(n, PauliExp::Phase(p) if !p.is_clifford())
+        }).count()
+    }
+
+    pub fn nlcount(&self) -> usize {
+        self.dag.node_weights().filter(|&n| {
+            matches!(n, PauliExp::Nonlocal(_))
+        }).count()
+    }
+
+    /// Rebuild the DAG from a topological order
+    pub fn rebuild(&mut self, order: &[NodeIndex]) {
+        self.dag.clear_edges();
+        for i in 0..order.len() {
+            for j in 0..i {
+                if !self.dag[order[j]].commutes(&self.dag[order[i]]) {
+                    self.dag.add_edge(order[j], order[i], ());
+                }
+            }
+        }
+    }
+
+    pub fn push(&mut self, exp: PauliExp) {
+        let idx = self.dag.add_node(exp);
+        for n in self.dag.node_indices() {
+            if !self.dag[n].commutes(&self.dag[idx]) {
+                self.dag.add_edge(n, idx, ());
+            }
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item=&PauliExp> {
+        let order = petgraph::algo::toposort(&self.dag, None).unwrap();
+        order.into_iter().map(|idx| &self.dag[idx])
+    }
+
+    /// Resynthesize a Circuit VERY naively. Does not respect architecture constraints.
+    pub fn naive_resynth(&self) -> Circuit {
+        let mut gates = Vec::new();
+        for exp in self.iter() {
+            let mut ngates = exp.to_gates_naive(&self.arch);
+            gates.append(&mut ngates);
+        }
+        gates.extend_from_slice(&self.tail.gates);
+
+        Circuit { gates, qubits: self.arch.qubits() }
     }
 }
