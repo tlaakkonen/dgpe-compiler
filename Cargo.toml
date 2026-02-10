@@ -27,6 +27,9 @@ git = "https://github.com/tlaakkonen/gf2-linalg"
 git = "https://github.com/ahenshaw/mwmatching"
 rev = "47dba28b30b710232d7b2efa43b5a61e9c634d42"
 
+[dependencies.dag-bin-packing]
+git = "https://github.com/tlaakkonen/dag-bin-packing"
+
 [features]
 default = ["quizx"]
 

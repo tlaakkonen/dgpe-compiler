@@ -473,7 +473,8 @@ impl Circuit {
         format!(".v {}\n.i {}\nBEGIN\n{}\nEND", qs, qs, out)
     }
 
-    pub fn partition(&self, arch: &GlobalArch) -> PartitionedCircuit {
+    /// Partitions the circuit naively, does not respect architecture constraints
+    pub fn partition_naive(&self, arch: &GlobalArch) -> PartitionedCircuit {
         let mut exps = Vec::new();
         let mut gates = Vec::new();
         for &gate in self.gates.iter().rev() {

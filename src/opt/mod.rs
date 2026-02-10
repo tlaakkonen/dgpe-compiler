@@ -15,7 +15,7 @@ pub struct PassMetrics {
 
 impl Debug for PassMetrics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.print(f, 0)
+        self.print(f, 0, self.elapsed)
     }
 }
 
@@ -51,17 +51,38 @@ impl PassMetrics {
         self.progress = prog;
     }
 
-    fn print(&self, f: &mut std::fmt::Formatter<'_>, indent: usize) -> std::fmt::Result {
-        writeln!(f, "{: <1$}{3} [{2:.2?}] {4}", 
+    pub fn join(&mut self, other: Self, name: Option<&'static str>) {
+        let clone = Self {
+            name: self.name,
+            props: std::mem::take(&mut self.props),
+            children: std::mem::take(&mut self.children),
+            elapsed: self.elapsed,
+            started: self.started,
+            progress: self.progress
+        };
+
+        let mut new = Self::new();
+        new.progress = self.progress | other.progress;
+        new.started = self.started.min(other.started);
+        new.elapsed = (self.started + self.elapsed).max(other.started + other.elapsed) - new.started;
+        new.name = name;
+        new.child(clone);
+        new.child(other);
+        *self = new;
+    }
+
+    fn print(&self, f: &mut std::fmt::Formatter<'_>, indent: usize, total: Duration) -> std::fmt::Result {
+        writeln!(f, "{: <1$}{3} [{2:.2?}, {5:.1}%] {4}", 
             "", indent, self.elapsed, 
             if let Some(name) = self.name { name } else { "<unnamed>" },
-            if self.progress { "" } else { "*" }
+            if self.progress { "" } else { "*" },
+            100.0 * (self.elapsed.as_secs_f32() / total.as_secs_f32())
         )?;
         for (k, v) in &self.props {
             writeln!(f, "{: <1$}- {2} = {3:?}", "", indent, k, v)?;
         }
         for child in &self.children {
-            child.print(f, indent + 2)?;
+            child.print(f, indent + 2, self.elapsed)?;
         }
         Ok(())
     }
