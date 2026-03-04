@@ -163,6 +163,44 @@ impl GlobalArch {
 
         GlobalArch { local, parts, topo: APSP::build(nonlocal) }
     }
+
+    pub fn from_nonlocal_graph(g: &UnGraph<usize, ()>) -> GlobalArch {
+        let mut local = Vec::new();
+        let mut parts = Vec::new();
+        let mut nonlocal = StableUnGraph::default();
+        for (p, np) in g.node_indices().enumerate() {
+            let idx = nonlocal.add_node(p);
+            let mut topo = StableUnGraph::default();
+            let mut qubits = Vec::new();
+            for i in 0..g[np] {
+                let lq = LocalQubit { idx: p, offset: i, global: local.len() };
+                qubits.push(topo.add_node(lq));
+                local.push(lq);
+            }
+
+            for a in 0..g[np] {
+                for b in 0..g[np] {
+                    if a >= b { continue }
+                    topo.add_edge(qubits[a], qubits[b], ());
+                }
+            }
+
+            parts.push(LocalArch { idx, qubits, topo: APSP::build(topo) });
+        }
+
+        for (ia, na) in g.node_indices().enumerate() {
+            for (ib, nb) in g.node_indices().enumerate() {
+                if ia >= ib || !g.contains_edge(na, nb) { continue }
+                for i in 0..g[na] {
+                    for j in 0..g[nb] {
+                        nonlocal.add_edge(parts[ia].idx, parts[ib].idx, (parts[ia].topo[parts[ia].qubits[i]], parts[ib].topo[parts[ib].qubits[j]]));
+                    }
+                }
+            }
+        }
+
+        GlobalArch { local, parts, topo: APSP::build(nonlocal) }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -304,7 +342,7 @@ impl<N, E> APSP<N, E> {
             if (!marked_s || !marked_t) && root_s != root_t {
                 ds.join(terms[&edge.source()], terms[&edge.target()]);
                 let root = ds.root_of(terms[&edge.source()]);
-                if marked_s || marked_t { marked.insert(root);}
+                if marked_s || marked_t { marked.insert(root); }
                 count += 1;
 
                 let idx = nodes.len();
@@ -330,7 +368,7 @@ impl<N, E> APSP<N, E> {
             if (!marked_s || !marked_t) && root_s != root_t {
                 ds.join(nodes[&edge.source()], nodes[&edge.target()]);
                 let root = ds.root_of(nodes[&edge.source()]);
-                if marked_s || marked_t { marked.insert(root);}
+                if marked_s || marked_t { marked.insert(root); }
                 tree.add_edge(edge.source(), edge.target(), ());
             }
         }
@@ -403,6 +441,18 @@ pub struct SteinerForest {
 }
 
 impl SteinerForest {
+    pub fn arbitrary_node(&self) -> Option<NodeIndex> {
+        self.forest.node_weights().next().copied()
+    }
+
+    pub fn size(&self) -> usize {
+        self.forest.node_count()
+    }
+
+    pub fn nodes(&self) -> impl Iterator<Item=NodeIndex> {
+        self.forest.node_weights().copied()
+    }
+
     pub fn edges_postorder(&self, root: NodeIndex, twice: bool) -> impl Iterator<Item=(Option<NodeIndex>, NodeIndex, NodeIndex)> {
         let root = self.forest.node_indices().find(|&r| self.forest[r] == root).unwrap();
         TreeEdgesPostorder::new(&self.forest, root, twice)

@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 use petgraph::graph::{DiGraph, NodeIndex};
-use crate::{GlobalArch, LocalQubit, PauliString};
+use crate::{GlobalArch, LocalQubit, PauliString, synth::NLPhaseCircuit};
 
 #[derive(Clone, Copy, Debug)]
 pub enum Gate {
@@ -297,25 +297,32 @@ impl NonlocalExp {
         let mut gates = Vec::new();
 
         let mut sa = self.string_a.clone();
-        let da = sa.diagonalize(&arch.parts[self.idx_a]);
+        let mut ia = self.idx_a;
+        let mut sb = self.string_b.clone();
+        let mut ib = self.idx_b;
+
+        if sa.xs.iter().any(|&x| x) {
+            std::mem::swap(&mut sa, &mut sb);
+            std::mem::swap(&mut ia, &mut ib);
+        }
+
+
+        let da = sa.diagonalize(&arch.parts[ia]);
         gates.extend_from_slice(&da);
 
-        let mut sb = self.string_b.clone();
-        let db = sb.diagonalize(&arch.parts[self.idx_b]);
+        let db = sb.x_diagonalize(&arch.parts[ib]);
         gates.extend_from_slice(&db);
 
-        let pa = sa.zs.iter().position(|&z| z).map(|p| arch.parts[self.idx_a].from_offset(p));
-        let pb = sb.zs.iter().position(|&z| z).map(|p| arch.parts[self.idx_b].from_offset(p));
+        let pa = sa.zs.iter().position(|&z| z).map(|p| arch.parts[ia].from_offset(p));
+        let pb = sb.xs.iter().position(|&x| x).map(|p| arch.parts[ib].from_offset(p));
         match (pa, pb) {
             (None, None) => (),
             (Some(qa), None) => if sb.sign { gates.push(Gate::Z(qa.global)) },
-            (None, Some(qb)) => if sa.sign { gates.push(Gate::Z(qb.global)) },
+            (None, Some(qb)) => if sa.sign { gates.push(Gate::X(qb.global)) },
             (Some(qa), Some(qb)) => {
                 if sb.sign { gates.push(Gate::Z(qa.global)) }
-                if sa.sign { gates.push(Gate::Z(qb.global)) }
-                gates.push(Gate::H(qb.global));
+                if sa.sign { gates.push(Gate::X(qb.global)) }
                 gates.push(Gate::CX(qa.global, qb.global));
-                gates.push(Gate::H(qb.global));
             }
         }
 
@@ -536,6 +543,13 @@ impl Circuit {
         exps.reverse();
 
         PartitionedCircuit::new(arch.clone(), exps, Circuit { gates, qubits: self.qubits })
+    }
+
+    pub fn partition(&self, arch: &GlobalArch) -> PartitionedCircuit {
+        let mut nl = NLPhaseCircuit::from_circuit(self, arch);
+        let mut exps = Vec::new();
+        let tail = nl.synthesize(&mut exps);
+        PartitionedCircuit::new(arch.clone(), exps, tail)
     }
 }
 

@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use gf2_linalg::{GF2, LinearSpace};
 
-use crate::{CliffordBasis, GlobalArch, NonlocalExp, PauliString};
+use crate::{CNOTRecorder, Circuit, CliffordBasis, CliffordRecorder, GlobalArch, LocalArch, NonlocalExp, PauliExp, PauliString, PhaseExp};
 
 #[derive(Clone)]
 pub struct BlockTableau {
@@ -115,6 +115,57 @@ impl BlockTableau {
             }
         }
         basis
+    }
+
+    pub fn to_local_bases(&self) -> Vec<CliffordBasis> {
+        self.verify_solved();
+
+        let mut bases = Vec::new();
+        for c in 0..self.parts {
+            let mut basis = CliffordBasis::empty(self.indices[c+1]-self.indices[c]);
+            for j in self.indices[c]..self.indices[c+1] {
+                basis.add_stabilizer(self.stabs[c][j].clone());
+                basis.add_destabilizer(self.destabs[c][j].clone());
+            }
+            assert!(basis.is_symplectic());
+            bases.push(basis);
+        }
+        bases
+    }
+
+    pub fn to_local_circuit(&self, arch: &GlobalArch) -> Circuit {
+        self.verify_solved();
+
+        struct Rec<'s> {
+            arch: &'s LocalArch,
+            circ: &'s mut Circuit
+        }
+
+        impl<'s> CNOTRecorder for Rec<'s> {
+            fn cx(&mut self, i: usize, j: usize) {
+                self.circ.cx(
+                    self.arch.topo[self.arch.qubits[i]].global,
+                    self.arch.topo[self.arch.qubits[j]].global
+                );
+            }
+        }
+
+        impl<'s> CliffordRecorder for Rec<'s> {
+            fn h(&mut self, i: usize) { self.circ.h(self.arch.topo[self.arch.qubits[i]].global) }
+            fn s(&mut self, i: usize) { self.circ.s(self.arch.topo[self.arch.qubits[i]].global) }
+            fn sdg(&mut self, i: usize) { self.circ.sdg(self.arch.topo[self.arch.qubits[i]].global) }
+            fn z(&mut self, i: usize) { self.circ.z(self.arch.topo[self.arch.qubits[i]].global) }
+            fn x(&mut self, i: usize) { self.circ.x(self.arch.topo[self.arch.qubits[i]].global) }
+        }
+
+        let mut local_bases = self.to_local_bases();
+        let mut circ = Circuit::new(arch.qubits());
+        for i in 0..arch.num_parts() {
+            let mut rec = Rec { arch: &arch.parts[i], circ: &mut circ };
+            local_bases[i].synthesize_constrained(&arch.parts[i], &mut rec);
+        }
+
+        circ
     }
 
     pub fn local_cx(&mut self, p: usize, i: usize, j: usize) {
@@ -386,6 +437,10 @@ pub trait NonlocalRecorder {
     fn nonlocal_exp(&mut self, exp: &NonlocalExp);
 }
 
+pub trait ExpRecorder: NonlocalRecorder {
+    fn phase_exp(&mut self, exp: &PhaseExp);
+}
+
 impl NonlocalRecorder for () {
     fn nonlocal_exp(&mut self, _: &NonlocalExp) {}
 }
@@ -399,5 +454,17 @@ impl NonlocalRecorder for BlockTableau {
 impl NonlocalRecorder for Vec<NonlocalExp> {
     fn nonlocal_exp(&mut self, exp: &NonlocalExp) {
         self.push(exp.clone());
+    }
+}
+
+impl NonlocalRecorder for Vec<PauliExp> {
+    fn nonlocal_exp(&mut self, exp: &NonlocalExp) {
+        self.push(PauliExp::Nonlocal(exp.clone()));
+    }
+}
+
+impl ExpRecorder for Vec<PauliExp> {
+    fn phase_exp(&mut self, exp: &PhaseExp) {
+        self.push(PauliExp::Phase(exp.clone()));
     }
 }

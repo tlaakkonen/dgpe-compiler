@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use gf2_linalg::{GF2, Matrix};
-use crate::{GlobalArch, LocalArch, NonlocalExp, PauliString, dist::NonlocalRecorder};
+use crate::{CNOTRecorder, CliffordBasis, CliffordRecorder, GlobalArch, LocalArch, NonlocalExp, PauliString, dist::NonlocalRecorder};
 
 #[derive(Clone)]
 pub struct BlockMatrix {
@@ -374,6 +374,35 @@ impl BlockMatrix {
         }
 
         self.verify_solved();
+    }
+
+    pub fn to_local(&mut self, arch: &GlobalArch, rec: &mut (impl CNOTRecorder + ?Sized)) {
+        self.verify_solved();
+
+        struct Rec<'a, R: ?Sized> {
+            rec: &'a mut R,
+            bm: &'a mut BlockMatrix,
+            part: usize,
+            arch: &'a LocalArch
+        }
+
+        impl<'a, R: CNOTRecorder + ?Sized> CNOTRecorder for Rec<'a, R> {
+            fn cx(&mut self, i: usize, j: usize) {
+                self.rec.cx(self.arch.from_offset(i).global, self.arch.from_offset(j).global);
+                self.bm.row_add(self.bm.indices[self.part] + i, self.bm.indices[self.part] + j);
+            }
+        }
+
+        impl<'a, R: CNOTRecorder + ?Sized> CliffordRecorder for Rec<'a, R> {
+            fn h(&mut self, _: usize) { unimplemented!() }
+            fn s(&mut self, _: usize) { unimplemented!() }
+        }
+
+        for i in 0..self.parts {
+            let mut par = CliffordBasis::from_parity_matrix(&self.block(i, i));
+            let mut rrec = Rec { rec, bm: self, part: i, arch: &arch.parts[i] };
+            par.synthesize_constrained(&arch.parts[i], &mut rrec);
+        }
     }
 }
 

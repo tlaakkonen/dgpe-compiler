@@ -1,6 +1,6 @@
 use std::{collections::HashSet, fmt::Debug};
 use crate::{Circuit, Gate, LocalArch};
-use gf2_linalg::{LinearSpace, Matrix, ToGF2};
+use gf2_linalg::{GF2, LinearSpace, Matrix, ToGF2};
 use petgraph::graph::UnGraph;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -295,6 +295,37 @@ impl PauliString {
             let li = arch.from_offset(i).global;
             self.cx(i, pivot);
             gates.push(Gate::CX(li, lpivot));
+        }
+
+        gates
+    }
+
+    /// Find a set of gates which diagonalizes this string in the X-basis
+    pub fn x_diagonalize(&mut self, arch: &LocalArch) -> Vec<Gate> {
+        let mut gates = Vec::new();
+
+        for i in 0..self.qubits() {
+            let li = arch.from_offset(i).global;
+            match self.get(i) {
+                Pauli::I | Pauli::X => (),
+                Pauli::Z => {
+                    self.h(i);
+                    gates.push(Gate::H(li));
+                },
+                Pauli::Y => {
+                    self.s(i);
+                    gates.push(Gate::S(li));
+                }
+            }
+        }
+        
+        let Some(pivot) = self.xs.iter().position(|&x| x) else { return gates };
+        let lpivot = arch.from_offset(pivot).global;
+        for i in 0..self.qubits() {
+            if i == pivot || self.get(i) == Pauli::I { continue }
+            let li = arch.from_offset(i).global;
+            self.cx(pivot, i);
+            gates.push(Gate::CX(lpivot, li));
         }
 
         gates
@@ -827,6 +858,28 @@ impl CliffordBasis {
         } else {
             Some(self.destabilizer_mat().slice(self.qubits.., ..))
         }
+    }
+
+    pub fn from_parity_matrix(mat: &Matrix) -> CliffordBasis {
+        assert!(mat.num_cols() == mat.num_rows() && mat.is_invertible());
+        let n = mat.num_cols();
+        let minvt = mat.inverse().unwrap().transpose();
+        let mut basis = CliffordBasis::empty(n);
+        for i in 0..n {
+            let mut p = PauliString::identity(n);
+            for j in 0..n {
+                if mat[(j, i)] == GF2::ONE { p.set(j, Pauli::X); }
+            }
+            basis.add_destabilizer(p);
+
+            let mut p = PauliString::identity(n);
+            for j in 0..n {
+                if minvt[(j, i)] == GF2::ONE { p.set(j, Pauli::Z); }
+            }
+            basis.add_stabilizer(p);
+        }
+        assert!(&basis.to_parity_matrix().unwrap() == mat);
+        basis
     }
 }
 
