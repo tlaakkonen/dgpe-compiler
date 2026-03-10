@@ -3,7 +3,6 @@ pub mod arch;
 pub mod clifford;
 pub mod dist;
 pub mod utils;
-pub mod embed;
 pub mod opt;
 pub mod synth;
 pub use arch::*;
